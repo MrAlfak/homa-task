@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sys
 
 from aiogram import Bot, Dispatcher
@@ -13,16 +14,18 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.webhook.aiohttp_server import SimpleRequestHandler, setup_application
 from aiohttp import web
 
-from bot.handlers import admin_tasks, content, employee_tasks, filming, ideas, start
+from bot.fsm_storage import JsonFileStorage
+
+from bot.handlers import admin_tasks, content, employee_tasks, filming, ideas, reports, start
 from bot.middlewares.dedupe import DuplicateTapMiddleware
 from bot.middlewares.errors import UserErrorMiddleware
 from bot.middlewares.feedback import InstantFeedbackMiddleware
+from bot.middlewares.menu_reset import MenuResetMiddleware
 
 try:
     from bot.handlers import announce as _announce_module  # noqa: F401
 except ImportError:
     _announce_module = None
-from bot.proxy import start_proxy
 from config import config
 from services.overdue import overdue_supervisor
 from services.sheets_async import SheetsAsync, warmup_caches
@@ -35,14 +38,70 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def _telegram_proxy_url() -> str:
+    """SOCKS URL for Telegram egress.
+
+    python-socks/aiogram only accept socks5:// (not socks5h://). Remote DNS is
+    still used because aiogram sets rdns=True on the SOCKS connector.
+    """
+    proxy = os.getenv("TELEGRAM_PROXY", "").strip()
+    if proxy.startswith("socks5h://"):
+        return "socks5://" + proxy[len("socks5h://") :]
+    return proxy
+
+
+async def diagnose_telegram_egress(proxy: str) -> None:
+    """One-shot probe so a stuck SOCKS handshake is visible in logs."""
+    import socket
+
+    try:
+        infos = socket.getaddrinfo("api.telegram.org", 443, type=socket.SOCK_STREAM)
+        logger.info(
+            "Local DNS api.telegram.org: %s",
+            ", ".join(sorted({i[4][0] for i in infos})),
+        )
+    except OSError as extra:
+        logger.info("Local DNS api.telegram.org failed: %s", extra)
+
+    async def _probe(host: str, port: int, payload: bytes = b"", label: str = "") -> None:
+        try:
+            reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(host, port),
+                6,
+            )
+            if payload:
+                writer.write(payload)
+                await writer.drain()
+            reply = await asyncio.wait_for(reader.read(48), 6)
+            logger.info("Path probe %s:%s %s -> %r", host, port, label, reply[:40] or b"empty")
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except Exception:  # noqa: BLE001
+                pass
+        except Exception as extra:  # noqa: BLE001
+            logger.warning(
+                "Path probe %s:%s %s failed: %s: %s",
+                host, port, label, type(extra).__name__, extra,
+            )
+
+    host_port = proxy.split("://", 1)[-1].split("@")[-1]
+    sock_host, port_s = host_port.rsplit(":", 1)
+    await _probe(sock_host, int(port_s), b"\x05\x01\x00", "proxy-socks")
+    await _probe("155.117.197.30", 22, label="ssh")
+    await _probe("155.117.197.30", 443, label="tcp443")
+    await _probe("155.117.197.30", 505, b"GET / HTTP/1.0\r\nHost: x\r\n\r\n", "http505")
+    await _probe("155.117.197.30", 8443, b"\x05\x01\x00", "socks8443")
+
+
 def create_bot() -> Bot:
     session = None
-    proxy_url = start_proxy()
-    if proxy_url:
+    proxy = _telegram_proxy_url()
+    if proxy:
         from aiogram.client.session.aiohttp import AiohttpSession
 
-        session = AiohttpSession(proxy=proxy_url)
-        logger.info("Telegram session routed through proxy.")
+        session = AiohttpSession(proxy=proxy)
+        logger.info("Telegram API via dedicated egress %s (not a user VPN)", proxy.split("@")[-1])
     return Bot(
         token=config.bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
@@ -51,7 +110,16 @@ def create_bot() -> Bot:
 
 
 def create_dispatcher() -> Dispatcher:
-    dp = Dispatcher(storage=MemoryStorage())
+    try:
+        storage = JsonFileStorage(config.fsm_path)
+        logger.info("FSM storage: %s", config.fsm_path)
+    except Exception:
+        logger.exception("FSM file storage failed; falling back to memory")
+        storage = MemoryStorage()
+    dp = Dispatcher(storage=storage)
+    # Outer: clear FSM *before* handler lookup so menu taps are not swallowed
+    # by "any text" steps (task title, filming location, idea text, …).
+    dp.message.outer_middleware(MenuResetMiddleware())
     # Single shared instance: the per-user busy-lock must cover both message
     # and callback events, otherwise a reply-keyboard tap and an inline-button
     # tap from the same user could still run concurrently.
@@ -68,11 +136,12 @@ def create_dispatcher() -> Dispatcher:
     dp.include_router(ideas.router)
     dp.include_router(filming.router)
     dp.include_router(content.router)
+    dp.include_router(reports.router)
     return dp
 
 
-async def wait_for_telegram(bot: Bot, attempts: int = 30, delay: float = 3.0) -> bool:
-    """Block until Telegram is reachable (e.g. while the proxy warms up).
+async def wait_for_telegram(bot: Bot, attempts: int = 10, delay: float = 2.0) -> bool:
+    """Block until Telegram is reachable.
 
     Never raises: on timeout it returns False and lets the polling loop keep
     retrying on its own, so the container stays up regardless.
@@ -84,8 +153,8 @@ async def wait_for_telegram(bot: Bot, attempts: int = 30, delay: float = 3.0) ->
             return True
         except Exception as exc:  # noqa: BLE001
             logger.info(
-                "Waiting for Telegram connectivity (%d/%d): %s",
-                attempt, attempts, type(exc).__name__,
+                "Waiting for Telegram connectivity (%d/%d): %s: %s",
+                attempt, attempts, type(exc).__name__, exc,
             )
             await asyncio.sleep(delay)
     logger.warning("No confirmed connectivity yet; polling will keep retrying.")
@@ -97,9 +166,14 @@ async def _log_build_info(bot: Bot) -> None:
     _ = bot
     from pathlib import Path
 
-    stamp = Path("/app/build_id.txt")
-    if stamp.is_file():
-        logger.info("Running build: %s", stamp.read_text(encoding="utf-8").strip())
+    stamp_candidates = (
+        Path("/app/build_id.txt"),
+        Path(__file__).resolve().parent.parent / "build_id.txt",
+    )
+    for stamp in stamp_candidates:
+        if stamp.is_file():
+            logger.info("Running build: %s", stamp.read_text(encoding="utf-8").strip())
+            break
     if _announce_module is not None:
         logger.info("Announce handler module: %s", _announce_module.__file__)
 
@@ -149,6 +223,12 @@ async def _start_overdue_supervisor(bot: Bot) -> None:
 
 
 async def run_polling() -> None:
+    if os.getenv("OVPN_USER", "").strip():
+        logger.info("Using MikroTik OpenVPN egress; skipping SOCKS path probes")
+    else:
+        proxy = _telegram_proxy_url()
+        if proxy:
+            await diagnose_telegram_egress(proxy)
     bot = create_bot()
     dp = create_dispatcher()
     dp.startup.register(_warmup_on_startup)
@@ -156,10 +236,9 @@ async def run_polling() -> None:
     dp.startup.register(_log_build_info)
     dp.startup.register(_start_overdue_supervisor)
     logger.info(
-        "Handlers loaded: announce, start, admin_tasks, employee_tasks, ideas, filming, content"
+        "Handlers loaded: announce, start, admin_tasks, employee_tasks, ideas, filming, content, reports"
     )
     logger.info("Starting bot in polling mode...")
-    # Give the embedded proxy time to bring a node up before polling begins.
     await wait_for_telegram(bot)
     try:
         # Long polling (30s) keeps the bot idle between updates: ~1 request per
@@ -186,9 +265,13 @@ async def run_webhook() -> None:
     dp.startup.register(_start_overdue_supervisor)
     webhook_url = f"{config.webhook_host}{config.webhook_path}"
 
-    await bot.set_webhook(webhook_url)
+    await bot.set_webhook(webhook_url, secret_token=config.webhook_secret)
     app = web.Application()
-    SimpleRequestHandler(dispatcher=dp, bot=bot).register(app, path=config.webhook_path)
+    SimpleRequestHandler(
+        dispatcher=dp,
+        bot=bot,
+        secret_token=config.webhook_secret,
+    ).register(app, path=config.webhook_path)
     setup_application(app, dp, bot=bot)
 
     logger.info("Starting webhook on %s:%s%s", config.webhook_host, config.webhook_port, config.webhook_path)

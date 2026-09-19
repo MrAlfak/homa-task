@@ -9,17 +9,6 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     BOT_MODE=polling \
     FATAL_RESTART_DELAY=20
 
-ARG SINGBOX_VERSION=1.13.14
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates wget \
-    && wget -qO /tmp/sing-box.tar.gz \
-        "https://github.com/SagerNet/sing-box/releases/download/v${SINGBOX_VERSION}/sing-box-${SINGBOX_VERSION}-linux-amd64.tar.gz" \
-    && tar -xzf /tmp/sing-box.tar.gz -C /tmp \
-    && mv "/tmp/sing-box-${SINGBOX_VERSION}-linux-amd64/sing-box" /usr/local/bin/sing-box \
-    && chmod +x /usr/local/bin/sing-box \
-    && rm -rf /tmp/sing-box.tar.gz "/tmp/sing-box-${SINGBOX_VERSION}-linux-amd64" \
-    && rm -rf /var/lib/apt/lists/*
-
 ARG APP_BUILD_ID=unknown
 ENV APP_BUILD_ID=${APP_BUILD_ID}
 
@@ -29,10 +18,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY build_id.txt ./
 COPY config.py .
 COPY bot ./bot
-RUN grep -q "sheets_async" bot/main.py
+RUN grep -q "sheets_async" bot/main.py \
+    && test ! -f bot/proxy.py
 COPY services ./services
 
 RUN useradd --create-home --uid 10001 appuser \
+    && mkdir -p /app/.cache \
     && chown -R appuser:appuser /app
 USER appuser
 

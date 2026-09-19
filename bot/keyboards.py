@@ -4,11 +4,21 @@ from __future__ import annotations
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardButton, ReplyKeyboardMarkup
 
-from config import config
-
-from services.sheets import GENERAL_PROJECT_CATEGORIES, PRIORITIES, Personnel, Task
+from services.sheets_models import (
+    GENERAL_PROJECT_CATEGORIES,
+    PRIORITIES,
+    PROJECTS_PAGE_SIZE,
+    REPORT_KIND_LABELS,
+    TASKS_PAGE_SIZE,
+    Personnel,
+    Task,
+    paginate,
+    shamsi_date_button_label,
+    shamsi_date_range,
+)
 
 OPEN_SHEET_BUTTON = "📊 باز کردن شیت"
+REPORTS_BUTTON = "📊 گزارش‌ها"
 IDEAS_BUTTON = "💡 ایده‌ها"
 FILMING_BUTTON = "🎥 تصویر برداری"
 CREATE_FILMING_BUTTON = "➕ ثبت تصویر برداری"
@@ -32,7 +42,8 @@ CREATE_TASK_TEXTS = frozenset({
 })
 
 MY_TASKS_TEXTS = frozenset({MY_TASKS_BUTTON, "تسک‌های من", "تسک های من"})
-ADMIN_MY_TASKS_TEXTS = frozenset({ADMIN_MY_TASKS_BUTTON, "تسک‌های من", "تسک های من"})
+ADMIN_MY_TASKS_TEXTS = frozenset({ADMIN_MY_TASKS_BUTTON, "📋تسک‌های من"})
+MY_TASKS_ALL_TEXTS = MY_TASKS_TEXTS | ADMIN_MY_TASKS_TEXTS
 DONE_TASKS_TEXTS = frozenset({DONE_TASKS_BUTTON, "تسک‌های انجام‌شده", "تسک های انجام شده"})
 TEAM_TASKS_TEXTS = frozenset({
     TEAM_TASKS_BUTTON,
@@ -51,8 +62,54 @@ CREATE_CONTENT_TEXTS = frozenset({CREATE_CONTENT_BUTTON, "ثبت تولید مح
 LIST_CONTENT_TEXTS = frozenset({LIST_CONTENT_BUTTON, "لیست تولید محتوا", "لیست تولیدمحتوا"})
 OPEN_CONTENT_SHEET_TEXTS = frozenset({OPEN_CONTENT_SHEET_BUTTON, "شیت دیزاین", "شیت تولید محتوا"})
 OPEN_SHEET_TEXTS = frozenset({OPEN_SHEET_BUTTON, "باز کردن شیت"})
+REPORTS_TEXTS = frozenset({REPORTS_BUTTON, "گزارش‌ها", "گزارشها", "گزارش ها"})
 CONFIRM_ANNOUNCE_BUTTON = "✅ تأیید و ارسال برای همه"
 CANCEL_ANNOUNCE_BUTTON = "❌ انصراف اعلان"
+
+SPECIAL_SECTIONS_BUTTON = "🗂 بخش‌های تخصصی"
+BACK_TO_MAIN_MENU_BUTTON = "🔙 بازگشت به منوی اصلی"
+
+SPECIAL_SECTIONS_TEXTS = frozenset({SPECIAL_SECTIONS_BUTTON, "بخش‌های تخصصی", "بخش های تخصصی"})
+BACK_TO_MAIN_MENU_TEXTS = frozenset({BACK_TO_MAIN_MENU_BUTTON, "بازگشت به منوی اصلی", "بازگشت"})
+
+# Actual reply-keyboard labels on the main menu. Announce confirm/cancel stay
+# out: those must not reset FSM (or a text-step) before their own handlers run.
+REPLY_MENU_TEXTS = (
+    CREATE_TASK_TEXTS
+    | MY_TASKS_ALL_TEXTS
+    | DONE_TASKS_TEXTS
+    | TEAM_TASKS_TEXTS
+    | IDEAS_TEXTS
+    | FILMING_TEXTS
+    | CONTENT_TEXTS
+    | OPEN_SHEET_TEXTS
+    | REPORTS_TEXTS
+    | SPECIAL_SECTIONS_TEXTS
+    | BACK_TO_MAIN_MENU_TEXTS
+)
+
+
+def is_my_tasks_text(text: str | None) -> bool:
+    if not text:
+        return False
+    t = text.strip()
+    if t in MY_TASKS_ALL_TEXTS:
+        return True
+    return (
+        t.startswith("📌 تسک‌های من")
+        or t.startswith("📋 تسک‌های من")
+        or t.startswith("تسک‌های من")
+        or t.startswith("تسک های من")
+    )
+
+
+def is_menu_text(text: str | None) -> bool:
+    if not text:
+        return False
+    t = text.strip()
+    if t in REPLY_MENU_TEXTS:
+        return True
+    return is_my_tasks_text(t)
 
 STATUS_LABELS = {
     "pending": "⏳ در انتظار",
@@ -62,11 +119,9 @@ STATUS_LABELS = {
 }
 
 
-def main_menu_keyboard(personnel: Personnel) -> ReplyKeyboardMarkup:
-    """Build reply menu from permissions (not role alone)."""
+def main_menu_keyboard(personnel: Personnel, open_tasks_count: int | None = None) -> ReplyKeyboardMarkup:
+    """Build clean, uncluttered reply menu from permissions."""
     from services.auth import (
-        can_access_content,
-        can_access_filming,
         can_create_tasks,
         can_view_all_tasks,
         is_admin,
@@ -74,9 +129,51 @@ def main_menu_keyboard(personnel: Personnel) -> ReplyKeyboardMarkup:
 
     rows: list[list[KeyboardButton]] = []
 
+    # Row 1: Create Task (if authorized)
     if can_create_tasks(personnel):
         rows.append([KeyboardButton(text=CREATE_TASK_BUTTON)])
 
+    # Row 2: My Tasks (with badge if open_tasks_count > 0) + Team/Done tasks
+    my_label = "📌 تسک‌های من"
+    if open_tasks_count is not None and open_tasks_count > 0:
+        my_label = f"📌 تسک‌های من ({open_tasks_count})"
+    elif is_admin(personnel):
+        my_label = "📋 تسک‌های من"
+
+    if can_view_all_tasks(personnel):
+        rows.append([
+            KeyboardButton(text=TEAM_TASKS_BUTTON),
+            KeyboardButton(text=my_label),
+        ])
+        rows.append([
+            KeyboardButton(text=DONE_TASKS_BUTTON),
+            KeyboardButton(text=SPECIAL_SECTIONS_BUTTON),
+        ])
+    else:
+        rows.append([
+            KeyboardButton(text=my_label),
+            KeyboardButton(text=DONE_TASKS_BUTTON),
+        ])
+        rows.append([
+            KeyboardButton(text=SPECIAL_SECTIONS_BUTTON),
+            KeyboardButton(text=OPEN_SHEET_BUTTON),
+        ])
+
+    if can_view_all_tasks(personnel):
+        rows.append([KeyboardButton(text=OPEN_SHEET_BUTTON)])
+
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+
+def special_sections_keyboard(personnel: Personnel) -> ReplyKeyboardMarkup:
+    """Submenu for specialized features (filming, content, reports, ideas)."""
+    from services.auth import (
+        can_access_content,
+        can_access_filming,
+        can_access_reports,
+    )
+
+    rows: list[list[KeyboardButton]] = []
     access_row: list[KeyboardButton] = []
     if can_access_filming(personnel):
         access_row.append(KeyboardButton(text=FILMING_BUTTON))
@@ -85,29 +182,14 @@ def main_menu_keyboard(personnel: Personnel) -> ReplyKeyboardMarkup:
     if access_row:
         rows.append(access_row)
 
-    if can_view_all_tasks(personnel):
-        my_label = ADMIN_MY_TASKS_BUTTON if is_admin(personnel) else MY_TASKS_BUTTON
-        rows.append([
-            KeyboardButton(text=TEAM_TASKS_BUTTON),
-            KeyboardButton(text=my_label),
-        ])
-    elif is_admin(personnel):
-        rows.append([
-            KeyboardButton(text=ADMIN_MY_TASKS_BUTTON),
-            KeyboardButton(text=IDEAS_BUTTON),
-        ])
-    else:
-        rows.append([
-            KeyboardButton(text=MY_TASKS_BUTTON),
-            KeyboardButton(text=DONE_TASKS_BUTTON),
-        ])
+    r2: list[KeyboardButton] = [KeyboardButton(text=IDEAS_BUTTON)]
+    if can_access_reports(personnel):
+        r2.append(KeyboardButton(text=REPORTS_BUTTON))
+    rows.append(r2)
 
-    if can_view_all_tasks(personnel) or not is_admin(personnel):
-        rows.append([KeyboardButton(text=IDEAS_BUTTON), KeyboardButton(text=OPEN_SHEET_BUTTON)])
-    else:
-        rows.append([KeyboardButton(text=OPEN_SHEET_BUTTON)])
-
+    rows.append([KeyboardButton(text=BACK_TO_MAIN_MENU_BUTTON)])
     return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
 
 
 def admin_main_keyboard() -> ReplyKeyboardMarkup:
@@ -189,44 +271,40 @@ def filming_weekday_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def filming_date_inline_keyboard(*, before: int = 15, after: int = 15) -> InlineKeyboardMarkup:
-    """Same ±15 day picker as task due dates, with filming callback prefix."""
-    from services.sheets import SheetsService
+DATE_PICKER_BEFORE = 0
+DATE_PICKER_AFTER = 6  # today + 6 days = one week
 
+
+def _week_date_grid(
+    *,
+    callback_prefix: str,
+    before: int = DATE_PICKER_BEFORE,
+    after: int = DATE_PICKER_AFTER,
+) -> list[list[InlineKeyboardButton]]:
     buttons: list[list[InlineKeyboardButton]] = []
-    dates = SheetsService.shamsi_date_range(before=before, after=after)
-    past = [(o, d) for o, d in dates if o < 0]
-    today_rows = [(o, d) for o, d in dates if o == 0]
-    future = [(o, d) for o, d in dates if o > 0]
-
-    def _append_date_grid(items: list[tuple[int, str]]) -> None:
-        row: list[InlineKeyboardButton] = []
-        for offset, date_str in items:
-            label = SheetsService.shamsi_date_button_label(offset, date_str)
-            row.append(
-                InlineKeyboardButton(
-                    text=label[:64],
-                    callback_data=f"filmdate:{offset}",
-                )
+    row: list[InlineKeyboardButton] = []
+    for offset, date_str in shamsi_date_range(before=before, after=after):
+        row.append(
+            InlineKeyboardButton(
+                text=shamsi_date_button_label(offset, date_str)[:64],
+                callback_data=f"{callback_prefix}:{offset}",
             )
-            if len(row) == 2:
-                buttons.append(row)
-                row = []
-        if row:
+        )
+        if len(row) == 2:
             buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    return buttons
 
-    if past:
-        buttons.append(
-            [InlineKeyboardButton(text=f"⏪ {before} روز قبل", callback_data="noop")]
-        )
-        _append_date_grid(past)
-    if today_rows:
-        _append_date_grid(today_rows)
-    if future:
-        buttons.append(
-            [InlineKeyboardButton(text=f"⏩ {after} روز بعد", callback_data="noop")]
-        )
-        _append_date_grid(future)
+
+def filming_date_inline_keyboard(
+    *,
+    before: int = DATE_PICKER_BEFORE,
+    after: int = DATE_PICKER_AFTER,
+) -> InlineKeyboardMarkup:
+    """One-week picker (today through +6) plus manual date."""
+    buttons = _week_date_grid(callback_prefix="filmdate", before=before, after=after)
     buttons.append(
         [InlineKeyboardButton(text="✏️ ورود دستی تاریخ", callback_data="filmdate:manual")]
     )
@@ -307,12 +385,16 @@ def content_detail_keyboard(entry_id: str, *, can_update: bool, status: str) -> 
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def cancel_idea_keyboard() -> InlineKeyboardMarkup:
+def cancel_flow_keyboard(callback_data: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="❌ انصراف", callback_data="idea:cancel")],
+            [InlineKeyboardButton(text="❌ انصراف", callback_data=callback_data)],
         ]
     )
+
+
+def cancel_idea_keyboard() -> InlineKeyboardMarkup:
+    return cancel_flow_keyboard("idea:cancel")
 
 
 def open_sheet_inline_keyboard(url: str, *, label: str = "📊 باز کردن Google Sheet") -> InlineKeyboardMarkup:
@@ -321,6 +403,20 @@ def open_sheet_inline_keyboard(url: str, *, label: str = "📊 باز کردن G
             [InlineKeyboardButton(text=label, url=url)],
         ]
     )
+
+
+def reports_inline_keyboard(kinds: tuple[str, ...]) -> InlineKeyboardMarkup:
+    labels = dict(REPORT_KIND_LABELS)
+    buttons: list[list[InlineKeyboardButton]] = []
+    row: list[InlineKeyboardButton] = []
+    for kind in kinds:
+        row.append(InlineKeyboardButton(text=labels.get(kind, kind), callback_data=f"report:{kind}"))
+        if len(row) == 2:
+            buttons.append(row)
+            row = []
+    if row:
+        buttons.append(row)
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def personnel_inline_keyboard(employees: list[Personnel]) -> InlineKeyboardMarkup:
@@ -342,14 +438,24 @@ def _project_picker_label(name: str) -> str:
     return (prefix + name)[:64]
 
 
-def projects_inline_keyboard(projects: list[str]) -> InlineKeyboardMarkup:
+def _projects_keyboard(
+    projects: list[str],
+    *,
+    page: int,
+    item_prefix: str,
+    page_prefix: str,
+    cancel_data: str,
+) -> InlineKeyboardMarkup:
+    page_items, page, total_pages = paginate(projects, page, PROJECTS_PAGE_SIZE)
+    start = page * PROJECTS_PAGE_SIZE
     buttons: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
-    for index, project in enumerate(projects[:30]):
+    for offset, project in enumerate(page_items):
+        index = start + offset
         row.append(
             InlineKeyboardButton(
                 text=_project_picker_label(project),
-                callback_data=f"projectidx:{index}",
+                callback_data=f"{item_prefix}:{index}",
             )
         )
         if len(row) == 2:
@@ -357,27 +463,39 @@ def projects_inline_keyboard(projects: list[str]) -> InlineKeyboardMarkup:
             row = []
     if row:
         buttons.append(row)
-    buttons.append([InlineKeyboardButton(text="❌ انصراف", callback_data="cancel:create_task")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
-
-
-def filming_projects_inline_keyboard(projects: list[str]) -> InlineKeyboardMarkup:
-    buttons: list[list[InlineKeyboardButton]] = []
-    row: list[InlineKeyboardButton] = []
-    for index, project in enumerate(projects[:30]):
-        row.append(
-            InlineKeyboardButton(
-                text=_project_picker_label(project),
-                callback_data=f"filmproject:{index}",
-            )
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️ قبل", callback_data=f"{page_prefix}:{page - 1}"))
+    if page + 1 < total_pages:
+        nav.append(InlineKeyboardButton(text="بعد ➡️", callback_data=f"{page_prefix}:{page + 1}"))
+    if nav:
+        buttons.append(nav)
+    if total_pages > 1:
+        buttons.append(
+            [InlineKeyboardButton(text=f"صفحه {page + 1}/{total_pages}", callback_data="noop")]
         )
-        if len(row) == 2:
-            buttons.append(row)
-            row = []
-    if row:
-        buttons.append(row)
-    buttons.append([InlineKeyboardButton(text="❌ انصراف", callback_data="film:cancel")])
+    buttons.append([InlineKeyboardButton(text="❌ انصراف", callback_data=cancel_data)])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def projects_inline_keyboard(projects: list[str], *, page: int = 0) -> InlineKeyboardMarkup:
+    return _projects_keyboard(
+        projects,
+        page=page,
+        item_prefix="projectidx",
+        page_prefix="projectpage",
+        cancel_data="cancel:create_task",
+    )
+
+
+def filming_projects_inline_keyboard(projects: list[str], *, page: int = 0) -> InlineKeyboardMarkup:
+    return _projects_keyboard(
+        projects,
+        page=page,
+        item_prefix="filmproject",
+        page_prefix="filmpage",
+        cancel_data="film:cancel",
+    )
 
 
 def filming_personnel_inline_keyboard(employees: list[Personnel]) -> InlineKeyboardMarkup:
@@ -394,23 +512,14 @@ def filming_personnel_inline_keyboard(employees: list[Personnel]) -> InlineKeybo
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def content_projects_inline_keyboard(projects: list[str]) -> InlineKeyboardMarkup:
-    buttons: list[list[InlineKeyboardButton]] = []
-    row: list[InlineKeyboardButton] = []
-    for index, project in enumerate(projects[:30]):
-        row.append(
-            InlineKeyboardButton(
-                text=_project_picker_label(project),
-                callback_data=f"contentproject:{index}",
-            )
-        )
-        if len(row) == 2:
-            buttons.append(row)
-            row = []
-    if row:
-        buttons.append(row)
-    buttons.append([InlineKeyboardButton(text="❌ انصراف", callback_data="content:cancel")])
-    return InlineKeyboardMarkup(inline_keyboard=buttons)
+def content_projects_inline_keyboard(projects: list[str], *, page: int = 0) -> InlineKeyboardMarkup:
+    return _projects_keyboard(
+        projects,
+        page=page,
+        item_prefix="contentproject",
+        page_prefix="contentpage",
+        cancel_data="content:cancel",
+    )
 
 
 def content_type_keyboard() -> InlineKeyboardMarkup:
@@ -471,58 +580,18 @@ def announce_confirm_reply_keyboard() -> ReplyKeyboardMarkup:
     )
 
 
-def skip_due_date_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="⏭ بدون ددلاین", callback_data="skip:due_date")],
-            [InlineKeyboardButton(text="❌ انصراف", callback_data="cancel:create_task")],
-        ]
-    )
-
-
-def due_date_inline_keyboard(*, before: int = 15, after: int = 15) -> InlineKeyboardMarkup:
-    """Pick deadline: past ``before`` days + today + future ``after`` days, or manual."""
-    from services.sheets import SheetsService
-
-    buttons: list[list[InlineKeyboardButton]] = []
-    dates = SheetsService.shamsi_date_range(before=before, after=after)
-    past = [(o, d) for o, d in dates if o < 0]
-    today_rows = [(o, d) for o, d in dates if o == 0]
-    future = [(o, d) for o, d in dates if o > 0]
-
-    def _append_date_grid(items: list[tuple[int, str]]) -> None:
-        row: list[InlineKeyboardButton] = []
-        for offset, date_str in items:
-            label = SheetsService.shamsi_date_button_label(offset, date_str)
-            row.append(
-                InlineKeyboardButton(
-                    text=label[:64],
-                    callback_data=f"duedate:{offset}",
-                )
-            )
-            if len(row) == 2:
-                buttons.append(row)
-                row = []
-        if row:
-            buttons.append(row)
-
-    if past:
-        buttons.append(
-            [InlineKeyboardButton(text=f"⏪ {before} روز قبل", callback_data="noop")]
-        )
-        _append_date_grid(past)
-
-    if today_rows:
-        _append_date_grid(today_rows)
-
-    if future:
-        buttons.append(
-            [InlineKeyboardButton(text=f"⏩ {after} روز بعد", callback_data="noop")]
-        )
-        _append_date_grid(future)
-
+def due_date_inline_keyboard(
+    *,
+    before: int = DATE_PICKER_BEFORE,
+    after: int = DATE_PICKER_AFTER,
+) -> InlineKeyboardMarkup:
+    """Pick deadline: this week (today through +6), skip, or type a date."""
+    buttons = _week_date_grid(callback_prefix="duedate", before=before, after=after)
     buttons.append(
         [InlineKeyboardButton(text="✏️ ورود دستی تاریخ", callback_data="duedate:manual")]
+    )
+    buttons.append(
+        [InlineKeyboardButton(text="⏭ بدون ددلاین (امروز)", callback_data="skip:due_date")]
     )
     buttons.append(
         [InlineKeyboardButton(text="❌ انصراف", callback_data="cancel:create_task")]
@@ -551,9 +620,19 @@ def team_users_keyboard(members: list[Personnel]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def user_tasks_keyboard(tasks: list[Task]) -> InlineKeyboardMarkup:
+def user_tasks_keyboard(
+    tasks: list[Task],
+    *,
+    member_tid: int,
+    page: int = 0,
+) -> InlineKeyboardMarkup:
     """Task list for one employee + back to the team user picker."""
-    markup = task_list_keyboard(tasks, show_assignee=False)
+    markup = task_list_keyboard(
+        tasks,
+        show_assignee=False,
+        page=page,
+        page_callback=f"task:up:{member_tid}",
+    )
     buttons = list(markup.inline_keyboard)
     buttons.append(
         [InlineKeyboardButton(text="🔙 لیست کارمندان", callback_data="task:users")]
@@ -561,20 +640,57 @@ def user_tasks_keyboard(tasks: list[Task]) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
-def task_list_keyboard(tasks: list[Task], *, show_assignee: bool = False) -> InlineKeyboardMarkup:
+def task_list_keyboard(
+    tasks: list[Task],
+    *,
+    show_assignee: bool = False,
+    page: int = 0,
+    page_callback: str = "task:page",
+    active_filter: str = "all",
+) -> InlineKeyboardMarkup:
+    page_items, page, total_pages = paginate(tasks, page, TASKS_PAGE_SIZE)
     buttons: list[list[InlineKeyboardButton]] = []
-    for task in tasks[:20]:
+
+    if len(tasks) > 2 or active_filter != "all":
+        f_all = "🔘 همه" if active_filter == "all" else "همه"
+        f_high = "🔘 ⚡ فوری" if active_filter == "high" else "⚡ فوری"
+        f_today = "🔘 📅 امروز" if active_filter == "today" else "📅 امروز"
+        buttons.append([
+            InlineKeyboardButton(text=f_all, callback_data="taskfilter:all"),
+            InlineKeyboardButton(text=f_high, callback_data="taskfilter:high"),
+            InlineKeyboardButton(text=f_today, callback_data="taskfilter:today"),
+        ])
+
+    for task in page_items:
         prefix = STATUS_LABELS.get(task.status, task.status)
         if show_assignee and task.assignee_name:
-            label = f"{prefix} | {task.assignee_name[:20]} | {task.title[:28]}"
+            label = f"{prefix} | {task.assignee_name[:16]} | {task.title[:24]}"
         else:
-            label = f"{prefix} | {task.title[:35]}"
-        # Telegram inline-button text is capped at 64 characters.
-        buttons.append(
-            [InlineKeyboardButton(text=label[:64], callback_data=f"task:view:{task.id}")]
-        )
+            label = f"{prefix} | {task.title[:30]}"
+
+        if task.status in ("pending", "in_progress"):
+            buttons.append([
+                InlineKeyboardButton(text=label[:50], callback_data=f"task:view:{task.id}"),
+                InlineKeyboardButton(text="✅ انجام", callback_data=f"task:quickdone:{task.id}"),
+            ])
+        else:
+            buttons.append(
+                [InlineKeyboardButton(text=label[:64], callback_data=f"task:view:{task.id}")]
+            )
+
     if not buttons:
         buttons.append([InlineKeyboardButton(text="تسکی یافت نشد", callback_data="noop")])
+    nav: list[InlineKeyboardButton] = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text="⬅️ قبل", callback_data=f"{page_callback}:{page - 1}"))
+    if page + 1 < total_pages:
+        nav.append(InlineKeyboardButton(text="بعد ➡️", callback_data=f"{page_callback}:{page + 1}"))
+    if nav:
+        buttons.append(nav)
+    if total_pages > 1:
+        buttons.append(
+            [InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop")]
+        )
     return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
@@ -582,19 +698,64 @@ def task_detail_keyboard(
     task: Task,
     *,
     can_update_status: bool = True,
+    is_manager: bool = False,
     back_callback: str = "task:list",
 ) -> InlineKeyboardMarkup:
     buttons: list[list[InlineKeyboardButton]] = []
     if can_update_status and task.status in {"pending", "in_progress"}:
+        status_row: list[InlineKeyboardButton] = []
         if task.status == "pending":
-            buttons.append(
-                [InlineKeyboardButton(text="🔄 شروع کار", callback_data=f"task:status:{task.id}:in_progress")]
+            status_row.append(
+                InlineKeyboardButton(text="🔄 شروع", callback_data=f"task:status:{task.id}:in_progress")
             )
-        buttons.append(
-            [InlineKeyboardButton(text="✅ انجام شد", callback_data=f"task:status:{task.id}:done")]
+        status_row.append(
+            InlineKeyboardButton(text="✅ انجام شد", callback_data=f"task:status:{task.id}:done")
         )
-        buttons.append(
-            [InlineKeyboardButton(text="❌ تسک لغو شده", callback_data=f"task:status:{task.id}:cancelled")]
+        status_row.append(
+            InlineKeyboardButton(text="❌ لغو", callback_data=f"task:status:{task.id}:cancelled")
         )
+        buttons.append(status_row)
+
+    buttons.append([
+        InlineKeyboardButton(text="💬 ثبت / ویرایش یادداشت", callback_data=f"task:note:{task.id}")
+    ])
+
+    if is_manager:
+        buttons.append([
+            InlineKeyboardButton(text="📅 تغییر ددلاین", callback_data=f"task:editdue:{task.id}"),
+            InlineKeyboardButton(text="⚡ تغییر اولویت", callback_data=f"task:editpri:{task.id}"),
+        ])
+
     buttons.append([InlineKeyboardButton(text="🔙 بازگشت", callback_data=back_callback)])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def task_confirm_inline_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="✅ تأیید و ثبت تسک", callback_data="taskconfirm:yes")],
+            [InlineKeyboardButton(text="✏️ ویرایش عنوان", callback_data="taskconfirm:edittitle")],
+            [InlineKeyboardButton(text="❌ انصراف", callback_data="cancel:create_task")],
+        ]
+    )
+
+
+def edit_priority_inline_keyboard(task_id: str) -> InlineKeyboardMarkup:
+    labels = {"High": "🔴 High", "Medium": "🟡 Medium", "Low": "🟢 Low"}
+    buttons = [
+        [InlineKeyboardButton(text=labels[p], callback_data=f"task:setpri:{task_id}:{p}")]
+        for p in PRIORITIES
+    ]
+    buttons.append([InlineKeyboardButton(text="🔙 بازگشت به تسک", callback_data=f"task:view:{task_id}")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def edit_due_date_inline_keyboard(task_id: str) -> InlineKeyboardMarkup:
+    buttons = _week_date_grid(callback_prefix=f"task:setdue:{task_id}")
+    buttons.append(
+        [InlineKeyboardButton(text="✏️ ورود دستی تاریخ", callback_data=f"task:setdue:{task_id}:manual")]
+    )
+    buttons.append(
+        [InlineKeyboardButton(text="🔙 بازگشت به تسک", callback_data=f"task:view:{task_id}")]
+    )
     return InlineKeyboardMarkup(inline_keyboard=buttons)

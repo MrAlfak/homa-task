@@ -22,7 +22,6 @@ from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
 from bot.messages.changelog import build_changelog_announcement
-from bot.proxy import start_proxy
 from config import config
 from services.sheets import get_sheets_service
 
@@ -48,18 +47,9 @@ async def run(*, dry_run: bool, send: bool) -> int:
         print("\nDry run only. Re-run with --send to broadcast.")
         return 0
 
-    proxy_url = start_proxy()
-    session = None
-    if proxy_url:
-        from aiogram.client.session.aiohttp import AiohttpSession
-
-        session = AiohttpSession(proxy=proxy_url)
-        print(f"Using proxy: {proxy_url}")
-
     bot = Bot(
         token=config.bot_token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-        session=session,
     )
 
     sent = 0

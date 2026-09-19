@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import logging
+import os
 import time
-from dataclasses import dataclass
 from functools import lru_cache
 
 import gspread
@@ -12,283 +12,119 @@ import jdatetime
 from google.oauth2.service_account import Credentials
 
 from config import config
+from services.sheets_models import (
+    CONTENT_DESIGN_NAMES,
+    CONTENT_HEADERS,
+    CONTENT_PROJECT_HEADER_ALIASES,
+    CONTENT_SHEET_ALIASES,
+    CONTENT_SHEET_NAME,
+    EDITING_SHEET_ALIASES,
+    EDITING_SHEET_NAME,
+    FILMING_HEADERS,
+    FILMING_PROJECT_HEADER_ALIASES,
+    FILMING_SHEET_ALIASES,
+    FILMING_SHEET_NAME,
+    DROPDOWN_RTL_HEADERS,
+    GENERAL_PROJECT_CATEGORIES,
+    IDEAS_HEADERS,
+    IDEAS_SHEET_NAME,
+    PERSONAL_HEADERS,
+    PERSONNEL_BOOL_HEADER_ALIASES,
+    PERSONNEL_CACHE_TTL_SEC,
+    PERSONNEL_EXTRA_COLUMNS,
+    PERSONNEL_MOBILE_HEADER_ALIASES,
+    PRIORITIES,
+    PROJECTS_CACHE_TTL_SEC,
+    PROJECTS_HEADER_ALIASES,
+    PROJECTS_SHEET_HEADER,
+    SCOPES,
+    SMS_LOG_HEADERS,
+    SMS_LOG_SHEET_NAME,
+    SMS_SETTINGS_CACHE_TTL_SEC,
+    SMS_SETTINGS_DEFAULT_ROWS,
+    SMS_SETTINGS_HEADERS,
+    SMS_SHEET_NAME,
+    STATUS_HEADER,
+    STATUS_SHEET_VALUES,
+    SYSTEM_TAB_ORDER,
+    TASKS_HEADERS,
+    TEMPLATE_HEADERS,
+    TEMPLATE_RECURRENCE_VALUES,
+    TEMPLATE_SHEET_ALIASES,
+    TEMPLATE_SHEET_NAME,
+    TEMPLATE_TEST_ROW,
+    TEMPLATE_TEST_TITLE,
+    WORKSHEET_CACHE_TTL_SEC,
+    ContentEntry,
+    FilmingEntry,
+    Idea,
+    Personnel,
+    SmsSettings,
+    Task,
+    TemplateEntry,
+    coalesce_personnel,
+    date_for_sheet,
+    is_blank_task_cell,
+    is_general_project,
+    is_personnel_bool_header,
+    normalize_sheet_title,
+    normalize_status,
+    overlay_status_from_personal,
+    paginate,
+    parse_bool,
+    parse_due_as_jalali,
+    parse_task_id,
+    personnel_from_record,
+    projects_data_start,
+    recent_shamsi_dates,
+    record_is_active,
+    record_telegram_id,
+    resolve_shamsi_date_offset,
+    role_label,
+    row_to_dict,
+    shamsi_date_button_label,
+    shamsi_date_range,
+    shamsi_today,
+    sms_settings_from_records,
+    sort_projects,
+    status_to_sheet,
+    task_match_key,
+    template_from_record,
+    validate_shamsi_date,
+)
 
 logger = logging.getLogger(__name__)
 
-PERSONNEL_CACHE_TTL_SEC = 45.0
-PROJECTS_CACHE_TTL_SEC = 45.0
-# gspread.Spreadsheet.worksheet()/worksheets() re-fetch the *entire* spreadsheet
-# metadata from the API on every call. Caching the title -> Worksheet mapping
-# for a short window avoids one extra Sheets API round-trip per personal-sheet
-# lookup (create_task, task lists, status updates, ...) and per Ideas-tab
-# access — this is a common source of hitting Google Sheets' per-minute quota
-# (which surfaces to users as "خطایی رخ داد" until they retry).
-WORKSHEET_CACHE_TTL_SEC = 60.0
 
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive.readonly",
+def _col_to_a1(index: int) -> str:
+    """1-based column index → A1 letter (1=A, 27=AA)."""
+    if index <= 0:
+        return "A"
+    letters: list[str] = []
+    current = index
+    while current:
+        current, remainder = divmod(current - 1, 26)
+        letters.append(chr(65 + remainder))
+    return "".join(reversed(letters))
+
+# Re-export public names so existing `from services.sheets import …` keep working.
+__all__ = [
+    "CONTENT_DESIGN_NAMES",
+    "CONTENT_SHEET_NAME",
+    "FILMING_SHEET_NAME",
+    "GENERAL_PROJECT_CATEGORIES",
+    "PERSONAL_HEADERS",
+    "PRIORITIES",
+    "TASKS_HEADERS",
+    "ContentEntry",
+    "FilmingEntry",
+    "Idea",
+    "Personnel",
+    "SheetsService",
+    "Task",
+    "get_sheets_service",
+    "paginate",
 ]
-
-PERSONNEL_HEADERS = [
-    "telegram_id",
-    "name",
-    "role",
-    "active",
-    "senior_admin",      # مدیر ارشد — TRUE marks a senior manager
-    "view_all_tasks",    # مشاهده همه تسک — when TRUE, senior admin sees all tasks
-]
-
-# Extra Personnel columns auto-added on startup (English key → Persian header in sheet).
-PERSONNEL_EXTRA_COLUMNS: tuple[tuple[str, str], ...] = (
-    ("senior_admin", "مدیر ارشد"),
-    ("view_all_tasks", "مشاهده همه تسک"),
-    ("filming_access", "تصویر برداری"),
-    ("content_access", "تولید محتوا"),
-)
-
-# Boolean Personnel columns that get a TRUE/FALSE dropdown (English + Persian headers).
-PERSONNEL_BOOL_HEADER_ALIASES: tuple[tuple[str, ...], ...] = (
-    ("active", "فعال"),
-    ("senior_admin", "مدیر ارشد"),
-    ("view_all_tasks", "مشاهده همه تسک"),
-    ("filming_access", "تصویر برداری"),
-    ("content_access", "تولید محتوا"),
-)
-
-# Main Tasks tab (row 1 headers in the customer's sheet)
-TASKS_HEADERS = [
-    "تسک",
-    "پروژه",
-    "مسوول تسک",
-    "ایجاد کننده",
-    "تاریخ ایجاد",
-    "ددلاین",
-    "اولویت",
-    "ماه ",
-]
-
-# Personal employee tabs
-PERSONAL_HEADERS = [
-    "تسک",
-    "پروژه",
-    "مسوول تسک",
-    "ایجاد کننده",
-    "تاریخ ایجاد",
-    "ددلاین",
-    "اولویت",
-    "وضعیت",
-    "توضیحات",
-]
-
-IDEAS_HEADERS = [
-    "ایده",
-    "ثبت کننده",
-    "نقش",
-    "تاریخ ثبت",
-    "telegram_id",
-]
-
-IDEAS_SHEET_NAME = "Ideas"
-
-FILMING_SHEET_NAME = "Meetings"
-FILMING_SHEET_ALIASES: tuple[str, ...] = (
-    "Meetings",
-    "Filming",
-    "تصویر برداری",
-)
-FILMING_HEADERS = [
-    "نام پروژه",
-    "محل فیلم برداری",
-    "روز",
-    "ساعت",
-    "تاریخ",
-    "مسوول",
-    "وضعیت",
-    "ایجاد کننده",
-]
-FILMING_PROJECT_HEADER_ALIASES = frozenset({
-    "نام پروژه",
-    "پروژه",
-    "project",
-    "Project",
-})
-
-CONTENT_SHEET_NAME = "Design"
-CONTENT_SHEET_ALIASES: tuple[str, ...] = (
-    "Design",
-    "Content",
-    "دیزاین",
-    "تولید محتوا",
-)
-# Design tab people (column «نام») — matches the sheet roster.
-CONTENT_DESIGN_NAMES: tuple[str, ...] = ("علیپور", "مرادی", "بخشی", "بخشنده")
-# Backward-compatible alias used by older call sites.
-CONTENT_TEAM_COLUMNS = CONTENT_DESIGN_NAMES
-CONTENT_TYPE_OPTIONS: tuple[str, ...] = ("پست", "استوری", "پست و استوری")
-# User layout: نام | پروژه | پست | استوری | وضعیت | ایجاد کننده
-CONTENT_HEADERS = [
-    "نام",
-    "پروژه",
-    "پست",
-    "استوری",
-    "وضعیت",
-    "ایجاد کننده",
-]
-CONTENT_PROJECT_HEADER_ALIASES = frozenset({"پروژه", "نام پروژه", "project", "Project"})
-
-# Cross-project / general categories (shown first in the bot; auto-added to Projects tab).
-GENERAL_PROJECT_CATEGORIES: tuple[str, ...] = (
-    "عمومی",
-    "آپلودها",
-    "کارهای مشترک",
-)
-
-PROJECTS_SHEET_HEADER = "پروژه"
-PROJECTS_HEADER_ALIASES = frozenset({
-    PROJECTS_SHEET_HEADER,
-    "project",
-    "Project",
-    "Projects",
-    "نام پروژه",
-})
-
-PERSIAN_MONTHS = [
-    "فروردین",
-    "اردیبهشت",
-    "خرداد",
-    "تیر",
-    "مرداد",
-    "شهریور",
-    "مهر",
-    "آبان",
-    "آذر",
-    "دی",
-    "بهمن",
-    "اسفند",
-]
-
-PRIORITIES = ("High", "Medium", "Low")
-
-STATUS_OPEN = {"", "pending", "در انتظار", "⏳ در انتظار"}
-STATUS_IN_PROGRESS = {"in_progress", "در حال انجام", "🔄 در حال انجام"}
-STATUS_DONE = {"done", "انجام شده", "✅ انجام شده", "انجام شد"}
-STATUS_CANCELLED = {
-    "cancelled",
-    "canceled",
-    "لغو شده",
-    "لغو شد",
-    "❌ لغو شده",
-    "تسک لغو شده",
-}
-
-
-@dataclass(frozen=True)
-class Personnel:
-    """Staff member from the Personnel sheet."""
-
-    telegram_id: int
-    name: str
-    role: str
-    active: bool
-    senior_admin: bool = False
-    view_all_tasks: bool = False
-    filming_access: bool = False
-    content_access: bool = False
-
-
-@dataclass(frozen=True)
-class Task:
-    """Task row from Tasks or a personal employee sheet."""
-
-    sheet_name: str
-    row_index: int
-    title: str
-    project: str
-    assignee_name: str
-    created_by: str
-    created_at: str
-    due_date: str
-    priority: str
-    status: str
-    description: str
-
-    @property
-    def id(self) -> str:
-        return f"{self.sheet_name}:{self.row_index}"
-
-
-@dataclass(frozen=True)
-class Idea:
-    """Idea row from the Ideas sheet."""
-
-    text: str
-    created_by: str
-    role: str
-    created_at: str
-    telegram_id: int
-    row_index: int
-
-
-@dataclass(frozen=True)
-class FilmingEntry:
-    """Row from the تصویر برداری filming schedule tab."""
-
-    row_index: int
-    project: str
-    location: str
-    day: str
-    hour: str
-    date: str
-    assignee_name: str
-    status: str
-    created_by: str
-
-    @property
-    def id(self) -> str:
-        # ASCII prefix keeps Telegram callback_data under 64 bytes.
-        return f"filming:{self.row_index}"
-
-    @property
-    def sheet_name(self) -> str:
-        return FILMING_SHEET_NAME
-
-
-@dataclass(frozen=True)
-class ContentEntry:
-    """Row from the Design tab (نام | پروژه | پست | استوری | …)."""
-
-    row_index: int
-    name: str
-    project: str
-    post: str
-    story: str
-    status: str
-    created_by: str
-
-    @property
-    def id(self) -> str:
-        return f"design:{self.row_index}"
-
-    @property
-    def sheet_name(self) -> str:
-        return CONTENT_SHEET_NAME
-
-    @property
-    def assignee_name(self) -> str:
-        return self.name
-
-    @property
-    def content_type(self) -> str:
-        has_post = bool(self.post.strip())
-        has_story = bool(self.story.strip())
-        if has_post and has_story:
-            return "پست و استوری"
-        if has_post:
-            return "پست"
-        if has_story:
-            return "استوری"
-        return ""
 
 
 class SheetsService:
@@ -304,7 +140,13 @@ class SheetsService:
         self._worksheet_cache: tuple[float, dict[str, gspread.Worksheet]] | None = None
         self._personnel_records_cache: tuple[float, list[dict[str, str]]] | None = None
         self._projects_cache: tuple[float, list[str]] | None = None
+        self._sms_settings_cache: tuple[float, SmsSettings] | None = None
+        self._filter_formula_cache: dict[int, bool] = {}
+        self._overdue_red_rows: dict[tuple[int, int], int] = {}
+        self._personal_tasks_cache: tuple[float, list[Task]] | None = None
 
+        worksheets = self._all_worksheets(force_refresh=True)
+        self.ensure_english_sheet_titles()
         worksheets = self._all_worksheets(force_refresh=True)
         try:
             self._personnel_ws = worksheets["Personnel"]
@@ -317,8 +159,14 @@ class SheetsService:
 
         self.ensure_personnel_schema()
         self.ensure_projects_schema()
+        self.ensure_tasks_status_column()
+        self.ensure_all_status_and_priority_dropdowns()
+        self.ensure_sheet_vazirmatn_font()
+        self.ensure_dropdown_right_align()
         self.ensure_filming_schema()
         self.ensure_content_schema()
+        self.ensure_sms_schema()
+        self.ensure_template_schema()
 
     def _get_or_rename_worksheet(
         self,
@@ -329,21 +177,69 @@ class SheetsService:
         worksheets = self._all_worksheets()
         if preferred_title in worksheets:
             return worksheets[preferred_title]
-        for alias in aliases:
-            if alias == preferred_title:
+        wanted = {normalize_sheet_title(preferred_title)}
+        wanted.update(normalize_sheet_title(alias) for alias in aliases)
+        for title, worksheet in worksheets.items():
+            if normalize_sheet_title(title) not in wanted:
                 continue
-            worksheet = worksheets.get(alias)
-            if worksheet is None:
-                continue
+            if title == preferred_title:
+                return worksheet
             try:
                 worksheet.update_title(preferred_title)
-                logger.info("Renamed worksheet %r -> %r", alias, preferred_title)
+                logger.info("Renamed worksheet %r -> %r", title, preferred_title)
             except Exception:
-                logger.exception("Failed renaming worksheet %r -> %r", alias, preferred_title)
+                logger.exception("Failed renaming worksheet %r -> %r", title, preferred_title)
                 return worksheet
             self.invalidate_worksheet_cache()
             return worksheet
         return None
+
+    def ensure_english_sheet_titles(self) -> None:
+        """Keep system tabs in English and a stable left-to-right order."""
+        pairs = (
+            (TEMPLATE_SHEET_NAME, TEMPLATE_SHEET_ALIASES),
+            (FILMING_SHEET_NAME, FILMING_SHEET_ALIASES),
+            (CONTENT_SHEET_NAME, CONTENT_SHEET_ALIASES),
+            (EDITING_SHEET_NAME, EDITING_SHEET_ALIASES),
+            (IDEAS_SHEET_NAME, ("Ideas", "ایده", "ایده ها")),
+            (SMS_SHEET_NAME, ("SMS", "پیامک")),
+            (SMS_LOG_SHEET_NAME, ("SMS_Log", "SMS Log", "لاگ پیامک")),
+        )
+        for preferred, aliases in pairs:
+            self._get_or_rename_worksheet(preferred, aliases)
+
+        worksheets = self._all_worksheets(force_refresh=True)
+        ordered: list[gspread.Worksheet] = []
+        used: set[int] = set()
+        for title in SYSTEM_TAB_ORDER:
+            worksheet = worksheets.get(title)
+            if worksheet is None or worksheet.id in used:
+                continue
+            ordered.append(worksheet)
+            used.add(worksheet.id)
+        for worksheet in self._spreadsheet.worksheets():
+            if worksheet.id not in used:
+                ordered.append(worksheet)
+                used.add(worksheet.id)
+        current = [ws.id for ws in self._spreadsheet.worksheets()]
+        desired = [ws.id for ws in ordered]
+        if current == desired:
+            return
+        requests = [
+            {
+                "updateSheetProperties": {
+                    "properties": {"sheetId": worksheet.id, "index": index},
+                    "fields": "index",
+                }
+            }
+            for index, worksheet in enumerate(ordered)
+        ]
+        try:
+            self._spreadsheet.batch_update({"requests": requests})
+            self.invalidate_worksheet_cache()
+            logger.info("Sheet tab order unified (%d tabs)", len(ordered))
+        except Exception:
+            logger.exception("Failed reordering worksheets")
 
     def _all_worksheets(self, *, force_refresh: bool = False) -> dict[str, gspread.Worksheet]:
         """Title -> Worksheet map, cached briefly to avoid repeated metadata fetches.
@@ -365,6 +261,7 @@ class SheetsService:
     def invalidate_worksheet_cache(self) -> None:
         """Drop cached worksheet list (e.g. after creating a new tab)."""
         self._worksheet_cache = None
+        self._filter_formula_cache.clear()
 
     def invalidate_personnel_cache(self) -> None:
         """Drop cached Personnel rows (e.g. after admin edits the sheet)."""
@@ -410,15 +307,18 @@ class SheetsService:
             if ws.col_count < required_cols:
                 ws.add_cols(required_cols - ws.col_count)
 
-            for _key, persian_header in missing:
+            for key, persian_header in missing:
                 col_index = len(headers) + 1
                 ws.update_cell(1, col_index, persian_header)
                 headers.append(persian_header)
                 added.append(persian_header)
 
+                if not is_personnel_bool_header(key, persian_header):
+                    continue
                 row_count = max(len(ws.col_values(1)), 1)
                 if row_count > 1:
-                    defaults = [["FALSE"]] * (row_count - 1)
+                    default_flag = "TRUE" if key == "telegram_notify" else "FALSE"
+                    defaults = [[default_flag]] * (row_count - 1)
                     start = gspread.utils.rowcol_to_a1(2, col_index)
                     end = gspread.utils.rowcol_to_a1(row_count, col_index)
                     ws.update(
@@ -430,8 +330,241 @@ class SheetsService:
             if added:
                 logger.info("Personnel sheet: added columns %s", added)
 
-        self.ensure_personnel_bool_dropdowns()
+        if added or self._force_sheet_schema():
+            self.ensure_personnel_bool_dropdowns()
+        self.ensure_personnel_mobile_column()
         return added
+
+    @staticmethod
+    def _force_sheet_schema() -> bool:
+        return os.getenv("FORCE_SHEET_SCHEMA", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+
+    def ensure_tasks_status_column(self) -> None:
+        """Append وضعیت on Tasks and put a dropdown on the whole column."""
+        worksheet = self._tasks_ws
+        headers = [str(h).strip() for h in worksheet.row_values(1)]
+        if STATUS_HEADER not in headers:
+            col_index = len(headers) + 1
+            if worksheet.col_count < col_index:
+                worksheet.add_cols(col_index - worksheet.col_count)
+            worksheet.update_cell(1, col_index, STATUS_HEADER)
+            logger.info("Tasks sheet: added %s column", STATUS_HEADER)
+            headers = [str(h).strip() for h in worksheet.row_values(1)]
+        self._apply_tasks_status_dropdown(headers)
+
+    def _apply_tasks_status_dropdown(self, headers: list[str] | None = None) -> None:
+        worksheet = self._tasks_ws
+        if headers is None:
+            headers = [str(h).strip() for h in worksheet.row_values(1)]
+        try:
+            col_index = headers.index(STATUS_HEADER)
+        except ValueError:
+            return
+        end_row = max(int(worksheet.row_count or 0), 2000)
+        try:
+            self._spreadsheet.batch_update(
+                {
+                    "requests": [
+                        {
+                            "setDataValidation": {
+                                "range": {
+                                    "sheetId": worksheet.id,
+                                    "startRowIndex": 1,
+                                    "endRowIndex": end_row,
+                                    "startColumnIndex": col_index,
+                                    "endColumnIndex": col_index + 1,
+                                },
+                                "rule": {
+                                    "condition": {
+                                        "type": "ONE_OF_LIST",
+                                        "values": [
+                                            {"userEnteredValue": item}
+                                            for item in STATUS_SHEET_VALUES
+                                        ],
+                                    },
+                                    "showCustomUi": True,
+                                    "strict": False,
+                                    "inputMessage": "وضعیت را از لیست انتخاب کنید",
+                                },
+                            }
+                        }
+                    ]
+                }
+            )
+            logger.info("Tasks sheet: status dropdown on column %s through row %s", col_index + 1, end_row)
+        except Exception:
+            logger.exception("Failed applying Tasks status dropdown")
+
+    def ensure_all_status_and_priority_dropdowns(self) -> None:
+        """Apply unified dropdown data validation for اولویت and وضعیت across all sheets."""
+        requests: list[dict] = []
+        for worksheet in self._all_worksheets().values():
+            headers = [str(header).strip() for header in worksheet.row_values(1)]
+            if not headers:
+                continue
+            end_row = max(int(worksheet.row_count or 0), 2000)
+            sheet_id = int(worksheet.id)
+            for col_index, header in enumerate(headers):
+                if header == "اولویت":
+                    requests.append(
+                        {
+                            "setDataValidation": {
+                                "range": {
+                                    "sheetId": sheet_id,
+                                    "startRowIndex": 1,
+                                    "endRowIndex": end_row,
+                                    "startColumnIndex": col_index,
+                                    "endColumnIndex": col_index + 1,
+                                },
+                                "rule": {
+                                    "condition": {
+                                        "type": "ONE_OF_LIST",
+                                        "values": [
+                                            {"userEnteredValue": item}
+                                            for item in PRIORITIES
+                                        ],
+                                    },
+                                    "showCustomUi": True,
+                                    "strict": False,
+                                    "inputMessage": "اولویت را انتخاب کنید",
+                                },
+                            }
+                        }
+                    )
+                elif header == "وضعیت":
+                    requests.append(
+                        {
+                            "setDataValidation": {
+                                "range": {
+                                    "sheetId": sheet_id,
+                                    "startRowIndex": 1,
+                                    "endRowIndex": end_row,
+                                    "startColumnIndex": col_index,
+                                    "endColumnIndex": col_index + 1,
+                                },
+                                "rule": {
+                                    "condition": {
+                                        "type": "ONE_OF_LIST",
+                                        "values": [
+                                            {"userEnteredValue": item}
+                                            for item in STATUS_SHEET_VALUES
+                                        ],
+                                    },
+                                    "showCustomUi": True,
+                                    "strict": False,
+                                    "inputMessage": "وضعیت را از لیست انتخاب کنید",
+                                },
+                            }
+                        }
+                    )
+        if not requests:
+            return
+        chunk_size = 20
+        for start in range(0, len(requests), chunk_size):
+            try:
+                self._spreadsheet.batch_update({"requests": requests[start : start + chunk_size]})
+            except Exception:
+                logger.exception("Failed applying unified status/priority dropdowns batch")
+        logger.info("Unified dropdowns applied to %d columns across sheets", len(requests))
+
+    def ensure_sheet_vazirmatn_font(self) -> None:
+        """Set Vazirmatn on the whole workbook, including numbers and dates."""
+        requests: list[dict] = [
+            {
+                "updateSpreadsheetProperties": {
+                    "properties": {
+                        "defaultFormat": {
+                            "textFormat": {"fontFamily": "Vazirmatn"},
+                        }
+                    },
+                    "fields": "defaultFormat.textFormat.fontFamily",
+                }
+            }
+        ]
+        for worksheet in self._all_worksheets().values():
+            requests.append(
+                {
+                    "repeatCell": {
+                        "range": {"sheetId": int(worksheet.id)},
+                        "cell": {
+                            "userEnteredFormat": {
+                                "textFormat": {"fontFamily": "Vazirmatn"},
+                            }
+                        },
+                        "fields": "userEnteredFormat.textFormat.fontFamily",
+                    }
+                }
+            )
+        try:
+            chunk_size = 12
+            for start in range(0, len(requests), chunk_size):
+                self._spreadsheet.batch_update({"requests": requests[start : start + chunk_size]})
+            logger.info("Applied Vazirmatn to %d worksheet(s)", len(self._all_worksheets()))
+        except Exception:
+            logger.exception("Failed applying Vazirmatn across the spreadsheet")
+
+    def _dropdown_right_align_request(
+        self,
+        *,
+        sheet_id: int,
+        col_index: int,
+        end_row: int,
+        start_row: int = 0,
+    ) -> dict:
+        return {
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": start_row,
+                    "endRowIndex": end_row,
+                    "startColumnIndex": col_index,
+                    "endColumnIndex": col_index + 1,
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "horizontalAlignment": "RIGHT",
+                        "textDirection": "RIGHT_TO_LEFT",
+                    }
+                },
+                "fields": "userEnteredFormat.horizontalAlignment,userEnteredFormat.textDirection",
+            }
+        }
+
+    def ensure_dropdown_right_align(self) -> None:
+        """Right-align Persian dropdown columns without flipping the whole sheet."""
+        requests: list[dict] = []
+        for worksheet in self._all_worksheets().values():
+            headers = [str(header).strip() for header in worksheet.row_values(1)]
+            if not headers:
+                continue
+            end_row = max(int(worksheet.row_count or 0), 2000)
+            sheet_id = int(worksheet.id)
+            seen: set[int] = set()
+            for col_index, header in enumerate(headers):
+                if header not in DROPDOWN_RTL_HEADERS or col_index in seen:
+                    continue
+                seen.add(col_index)
+                requests.append(
+                    self._dropdown_right_align_request(
+                        sheet_id=sheet_id,
+                        col_index=col_index,
+                        end_row=end_row,
+                    )
+                )
+        if not requests:
+            return
+        try:
+            chunk_size = 12
+            for start in range(0, len(requests), chunk_size):
+                self._spreadsheet.batch_update({"requests": requests[start : start + chunk_size]})
+            logger.info("Right-aligned %d dropdown column(s)", len(requests))
+        except Exception:
+            logger.exception("Failed right-aligning dropdown columns")
 
     def ensure_personnel_bool_dropdowns(self) -> None:
         """Apply TRUE/FALSE list dropdowns on Personnel boolean columns."""
@@ -497,14 +630,63 @@ class SheetsService:
         except Exception:
             logger.exception("Failed applying Personnel TRUE/FALSE dropdowns")
 
-    @staticmethod
-    def _projects_data_start(col_values: list[str]) -> int:
-        """Index in col_values where project names begin (0 = no header row)."""
-        if not col_values:
-            return 0
-        if col_values[0].strip() in PROJECTS_HEADER_ALIASES:
-            return 1
-        return 0
+    def ensure_personnel_mobile_column(self) -> None:
+        """Keep موبایل as free text so phone numbers are not blocked by TRUE/FALSE rules."""
+        worksheet = self._personnel_ws
+        headers = [str(h).strip() for h in worksheet.row_values(1)]
+        if not headers:
+            return
+        mobile_aliases = {alias.strip().lower() for alias in PERSONNEL_MOBILE_HEADER_ALIASES if alias.strip()}
+        mobile_cols = [
+            index
+            for index, header in enumerate(headers)
+            if header.strip().lower() in mobile_aliases
+        ]
+        if not mobile_cols:
+            return
+
+        end_row = max(int(worksheet.row_count or 0), 1000)
+        requests: list[dict] = []
+        for col_index in mobile_cols:
+            requests.append(
+                {
+                    "setDataValidation": {
+                        "range": {
+                            "sheetId": worksheet.id,
+                            "startRowIndex": 1,
+                            "endRowIndex": end_row,
+                            "startColumnIndex": col_index,
+                            "endColumnIndex": col_index + 1,
+                        },
+                        "rule": None,
+                    }
+                }
+            )
+            requests.append(
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": worksheet.id,
+                            "startRowIndex": 1,
+                            "endRowIndex": end_row,
+                            "startColumnIndex": col_index,
+                            "endColumnIndex": col_index + 1,
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "numberFormat": {"type": "TEXT"},
+                            }
+                        },
+                        "fields": "userEnteredFormat.numberFormat",
+                    }
+                }
+            )
+        try:
+            self._spreadsheet.batch_update({"requests": requests})
+        except Exception:
+            logger.exception("Failed clearing Personnel mobile validation")
+
+    _projects_data_start = staticmethod(projects_data_start)
 
     def ensure_projects_schema(self) -> list[str]:
         """Ensure Projects tab has a header and default cross-project categories."""
@@ -543,167 +725,25 @@ class SheetsService:
             self.invalidate_projects_cache()
         return added
 
-    @staticmethod
-    def sort_projects(projects: list[str]) -> list[str]:
-        """General/cross-project names first, then the rest alphabetically."""
-        general_set = set(GENERAL_PROJECT_CATEGORIES)
-        general = [name for name in GENERAL_PROJECT_CATEGORIES if name in projects]
-        other = sorted((name for name in projects if name not in general_set), key=str)
-        return general + other
-
-    @staticmethod
-    def is_general_project(name: str) -> bool:
-        return name.strip() in GENERAL_PROJECT_CATEGORIES
-
-    @staticmethod
-    def _parse_bool(value: str, *, default: bool = False) -> bool:
-        cleaned = value.strip()
-        if not cleaned:
-            return default
-        return cleaned.upper() in {"TRUE", "1", "YES", "بله", "Y"}
-
-    @staticmethod
-    def _record_telegram_id(record: dict[str, str]) -> int | None:
-        """Resolve telegram id from Personnel row (English or Persian headers)."""
-        for key in ("telegram_id", "Telegram ID", "telegram id", "شناسه تلگرام"):
-            raw = str(record.get(key, "")).strip()
-            if not raw:
-                continue
-            try:
-                tid = int(float(raw))
-            except (ValueError, TypeError):
-                continue
-            if tid > 0:
-                return tid
-        return None
-
-    @staticmethod
-    def _record_is_active(record: dict[str, str]) -> bool:
-        """Empty/missing active column counts as active (default TRUE)."""
-        raw = str(record.get("active", "")).strip()
-        if not raw:
-            return True
-        return SheetsService._parse_bool(raw, default=True)
-
-    @staticmethod
-    def _shamsi_today() -> tuple[str, str]:
-        """Return today's Jalali date (YYYY/MM/DD) and the Persian month label."""
-        now = jdatetime.datetime.now()
-        date_str = f"{now.year:04d}/{now.month:02d}/{now.day:02d}"
-        month_str = PERSIAN_MONTHS[now.month - 1] + " "
-        return date_str, month_str
-
-    @staticmethod
-    def shamsi_date_range(*, before: int = 15, after: int = 15) -> list[tuple[int, str]]:
-        """Jalali dates from ``-before`` … ``+after`` relative to today.
-
-        Each item is ``(day_offset, YYYY/MM/DD)``. Offset 0 is today.
-        """
-        today = jdatetime.date.today()
-        result: list[tuple[int, str]] = []
-        for offset in range(-before, after + 1):
-            day = today + jdatetime.timedelta(days=offset)
-            date_str = f"{day.year:04d}/{day.month:02d}/{day.day:02d}"
-            result.append((offset, date_str))
-        return result
-
-    @staticmethod
-    def recent_shamsi_dates(count: int = 30) -> list[tuple[int, str]]:
-        """Upcoming Jalali dates from today forward (legacy helper)."""
-        return [
-            (offset, date_str)
-            for offset, date_str in SheetsService.shamsi_date_range(before=0, after=max(0, count - 1))
-        ]
-
-    @staticmethod
-    def shamsi_date_button_label(day_offset: int, date_str: str) -> str:
-        """Human-readable label for a due-date picker button (kept short for large taps)."""
-        short = date_str[5:] if len(date_str) >= 10 else date_str
-        if day_offset == 0:
-            return f"📅 امروز  {short}"
-        if day_offset == 1:
-            return f"فردا  {short}"
-        if day_offset == -1:
-            return f"دیروز  {short}"
-        today = jdatetime.date.today()
-        day = today + jdatetime.timedelta(days=day_offset)
-        try:
-            day_fa = jdatetime.date(day.year, day.month, day.day, locale=jdatetime.FA_LOCALE)
-            weekday = day_fa.strftime("%A")
-        except Exception:
-            weekday = f"{day_offset:+d}"
-        return f"{weekday}  {short}"
-
-    @staticmethod
-    def resolve_shamsi_date_offset(
-        day_offset: int,
-        *,
-        before: int = 15,
-        after: int = 15,
-    ) -> str | None:
-        for offset, date_str in SheetsService.shamsi_date_range(before=before, after=after):
-            if offset == day_offset:
-                return date_str
-        return None
-
-    @staticmethod
-    def validate_shamsi_date(value: str) -> str | None:
-        """Parse and normalize a Jalali date string (YYYY/MM/DD)."""
-        clean = value.strip().lstrip("'").replace("-", "/")
-        parts = clean.split("/")
-        if len(parts) != 3:
-            return None
-        try:
-            year, month, day = (int(parts[0]), int(parts[1]), int(parts[2]))
-            jdatetime.date(year, month, day)
-        except (ValueError, TypeError):
-            return None
-        return f"{year:04d}/{month:02d}/{day:02d}"
-
-    @staticmethod
-    def _date_for_sheet(date_str: str) -> str:
-        """Force Google Sheets to store Jalali dates as text, not serial numbers.
-
-        Without the leading apostrophe, values like 1405/04/09 are auto-parsed as
-        Gregorian dates and show up as broken numbers (e.g. 180697).
-        """
-        clean = date_str.strip().lstrip("'")
-        return f"'{clean}" if clean else ""
-
-    @staticmethod
-    def _normalize_status(value: str) -> str:
-        raw = value.strip()
-        lower = raw.lower()
-        if lower in STATUS_DONE or raw in STATUS_DONE:
-            return "done"
-        if lower in STATUS_CANCELLED or raw in STATUS_CANCELLED:
-            return "cancelled"
-        if lower in STATUS_IN_PROGRESS or raw in STATUS_IN_PROGRESS:
-            return "in_progress"
-        return "pending"
-
-    @staticmethod
-    def _status_to_sheet(status: str) -> str:
-        return {
-            "pending": "در انتظار",
-            "in_progress": "در حال انجام",
-            "done": "انجام شده",
-            "cancelled": "لغو شده",
-        }.get(status, status)
-
-    @staticmethod
-    def _row_to_dict(headers: list[str], row: list[str]) -> dict[str, str]:
-        padded = row + [""] * max(0, len(headers) - len(row))
-        return dict(zip(headers, padded[: len(headers)], strict=False))
-
-    @staticmethod
-    def _is_blank_task_cell(value: object) -> bool:
-        """True when column A has no real task title (empty or formula error)."""
-        text = str(value).strip()
-        if not text:
-            return True
-        # #REF!, #VALUE!, … left after insert_row shifts or manual edits
-        return text.startswith("#")
+    sort_projects = staticmethod(sort_projects)
+    is_general_project = staticmethod(is_general_project)
+    _parse_bool = staticmethod(parse_bool)
+    _record_telegram_id = staticmethod(record_telegram_id)
+    _record_is_active = staticmethod(record_is_active)
+    _shamsi_today = staticmethod(shamsi_today)
+    shamsi_date_range = staticmethod(shamsi_date_range)
+    recent_shamsi_dates = staticmethod(recent_shamsi_dates)
+    shamsi_date_button_label = staticmethod(shamsi_date_button_label)
+    resolve_shamsi_date_offset = staticmethod(resolve_shamsi_date_offset)
+    validate_shamsi_date = staticmethod(validate_shamsi_date)
+    _date_for_sheet = staticmethod(date_for_sheet)
+    _normalize_status = staticmethod(normalize_status)
+    _status_to_sheet = staticmethod(status_to_sheet)
+    _row_to_dict = staticmethod(row_to_dict)
+    _is_blank_task_cell = staticmethod(is_blank_task_cell)
+    _role_label = staticmethod(role_label)
+    _parse_due_as_jalali = staticmethod(parse_due_as_jalali)
+    _task_match_key = staticmethod(task_match_key)
 
     def _row_is_writable(self, row: list[str], col_count: int) -> bool:
         """A row can be reused when it has no real task in the first column."""
@@ -732,15 +772,20 @@ class SheetsService:
 
     def _personal_sheet_uses_tasks_filter(self, worksheet: gspread.Worksheet) -> bool:
         """True when this personal tab mirrors Tasks via FILTER (bot must not write rows)."""
+        ws_id = int(worksheet.id)
+        cached = self._filter_formula_cache.get(ws_id)
+        if cached is not None:
+            return cached
         try:
             cell = worksheet.acell("A2", value_render_option="FORMULA")
             formula = str(cell.value or "").strip().upper()
         except Exception as exc:
             logger.debug("Could not read A2 formula on %s: %s", worksheet.title, exc)
+            self._filter_formula_cache[ws_id] = False
             return False
-        if not formula.startswith("="):
-            return False
-        return "FILTER" in formula and "TASKS!" in formula
+        uses_filter = formula.startswith("=") and "FILTER" in formula and "TASKS!" in formula
+        self._filter_formula_cache[ws_id] = uses_filter
+        return uses_filter
 
     def _row2_has_formula_template(self, worksheet: gspread.Worksheet) -> bool:
         """True when A2 holds a sheet formula (FILTER / ARRAYFORMULA / QUERY)."""
@@ -865,6 +910,216 @@ class SheetsService:
             worksheet.append_row(IDEAS_HEADERS, value_input_option="USER_ENTERED")
         return worksheet
 
+    def _ensure_named_worksheet(
+        self,
+        title: str,
+        *,
+        rows: int,
+        cols: int,
+        headers: list[str],
+        default_rows: list[list[str]] | None = None,
+    ) -> gspread.Worksheet:
+        worksheet = self._all_worksheets().get(title)
+        if worksheet is None:
+            worksheet = self._spreadsheet.add_worksheet(title=title, rows=rows, cols=cols)
+            payload = [headers]
+            if default_rows:
+                payload.extend(default_rows)
+            end = gspread.utils.rowcol_to_a1(len(payload), len(headers))
+            worksheet.update(f"A1:{end}", payload, value_input_option="USER_ENTERED")
+            logger.info("Created worksheet %s", title)
+            self.invalidate_worksheet_cache()
+            return worksheet
+        existing = [str(h).strip() for h in worksheet.row_values(1)]
+        if not existing:
+            payload = [headers]
+            if default_rows:
+                payload.extend(default_rows)
+            end = gspread.utils.rowcol_to_a1(len(payload), len(headers))
+            worksheet.update(f"A1:{end}", payload, value_input_option="USER_ENTERED")
+        return worksheet
+
+    def ensure_sms_schema(self) -> None:
+        """Create SMS settings + log tabs if they are missing."""
+        self._ensure_named_worksheet(
+            SMS_SHEET_NAME,
+            rows=40,
+            cols=len(SMS_SETTINGS_HEADERS),
+            headers=list(SMS_SETTINGS_HEADERS),
+            default_rows=[list(row) for row in SMS_SETTINGS_DEFAULT_ROWS],
+        )
+        self._ensure_named_worksheet(
+            SMS_LOG_SHEET_NAME,
+            rows=1000,
+            cols=len(SMS_LOG_HEADERS),
+            headers=list(SMS_LOG_HEADERS),
+        )
+
+    def ensure_template_schema(self) -> None:
+        """Create the Templates tab, dropdowns, and an inactive sample row."""
+        worksheet = self._get_or_rename_worksheet(TEMPLATE_SHEET_NAME, TEMPLATE_SHEET_ALIASES)
+        if worksheet is None:
+            worksheet = self._ensure_named_worksheet(
+                TEMPLATE_SHEET_NAME,
+                rows=200,
+                cols=len(TEMPLATE_HEADERS),
+                headers=list(TEMPLATE_HEADERS),
+                default_rows=[list(TEMPLATE_TEST_ROW)],
+            )
+        headers = [str(h).strip() for h in worksheet.row_values(1)]
+        missing = [name for name in TEMPLATE_HEADERS if name not in headers]
+        if missing:
+            required_cols = len(headers) + len(missing)
+            if worksheet.col_count < required_cols:
+                worksheet.add_cols(required_cols - worksheet.col_count)
+            for name in missing:
+                col_index = len(headers) + 1
+                worksheet.update_cell(1, col_index, name)
+                headers.append(name)
+        self._ensure_template_test_row(worksheet, headers)
+        self._apply_template_dropdowns(worksheet, headers)
+
+    def _ensure_template_test_row(self, worksheet: gspread.Worksheet, headers: list[str]) -> None:
+        values = worksheet.get_all_values()
+        title_idx = headers.index("تسک") if "تسک" in headers else 1
+        for row in values[1:]:
+            title = row[title_idx].strip() if title_idx < len(row) else ""
+            if title == TEMPLATE_TEST_TITLE:
+                return
+        worksheet.append_row(list(TEMPLATE_TEST_ROW), value_input_option="USER_ENTERED")
+
+    def _apply_template_dropdowns(self, worksheet: gspread.Worksheet, headers: list[str]) -> None:
+        end_row = max(int(worksheet.row_count or 0), 200)
+        requests: list[dict] = []
+        dropdowns: list[tuple[str, tuple[str, ...]]] = [
+            ("فعال", ("TRUE", "FALSE")),
+            ("تکرارشوندگی", TEMPLATE_RECURRENCE_VALUES),
+            ("اولویت", PRIORITIES),
+        ]
+        for header, options in dropdowns:
+            if header not in headers:
+                continue
+            col_index = headers.index(header)
+            requests.append(
+                {
+                    "setDataValidation": {
+                        "range": {
+                            "sheetId": worksheet.id,
+                            "startRowIndex": 1,
+                            "endRowIndex": end_row,
+                            "startColumnIndex": col_index,
+                            "endColumnIndex": col_index + 1,
+                        },
+                        "rule": {
+                            "condition": {
+                                "type": "ONE_OF_LIST",
+                                "values": [{"userEnteredValue": item} for item in options],
+                            },
+                            "showCustomUi": True,
+                            "strict": True,
+                        },
+                    }
+                }
+            )
+        if not requests:
+            return
+        try:
+            self._spreadsheet.batch_update({"requests": requests})
+        except Exception:
+            logger.exception("Failed applying Templates dropdowns")
+
+    def list_template_entries(self) -> list[TemplateEntry]:
+        worksheet = self._all_worksheets().get(TEMPLATE_SHEET_NAME)
+        if worksheet is None:
+            self.ensure_template_schema()
+            worksheet = self._all_worksheets().get(TEMPLATE_SHEET_NAME)
+        if worksheet is None:
+            return []
+        values = worksheet.get_all_values()
+        if len(values) <= 1:
+            return []
+        headers = [str(h).strip() for h in values[0]]
+        entries: list[TemplateEntry] = []
+        for index, row in enumerate(values[1:], start=2):
+            record = self._row_to_dict(headers, row)
+            entry = template_from_record(record, index)
+            if entry is not None:
+                entries.append(entry)
+        return entries
+
+    def update_template_run(self, row_index: int, *, last_run: str, next_run: str) -> None:
+        worksheet = self._all_worksheets().get(TEMPLATE_SHEET_NAME)
+        if worksheet is None:
+            return
+        headers = [str(h).strip() for h in worksheet.row_values(1)]
+        updates: list[dict] = []
+        if "آخرین اجرا" in headers:
+            cell = gspread.utils.rowcol_to_a1(row_index, headers.index("آخرین اجرا") + 1)
+            updates.append({"range": cell, "values": [[self._date_for_sheet(last_run)]]})
+        if "اجرای بعدی" in headers:
+            cell = gspread.utils.rowcol_to_a1(row_index, headers.index("اجرای بعدی") + 1)
+            updates.append({"range": cell, "values": [[self._date_for_sheet(next_run)]]})
+        if updates:
+            worksheet.batch_update(updates, value_input_option="USER_ENTERED")
+
+    def get_sms_settings(self) -> SmsSettings:
+        now = time.monotonic()
+        if self._sms_settings_cache is not None:
+            cached_at, settings = self._sms_settings_cache
+            if now - cached_at < SMS_SETTINGS_CACHE_TTL_SEC:
+                return settings
+        worksheet = self._all_worksheets().get(SMS_SHEET_NAME)
+        if worksheet is None:
+            settings = SmsSettings()
+        else:
+            try:
+                records = worksheet.get_all_records()
+            except Exception:
+                logger.exception("SMS settings read failed")
+                records = []
+            settings = sms_settings_from_records(records)
+        self._sms_settings_cache = (now, settings)
+        return settings
+
+    def append_sms_log(
+        self,
+        *,
+        name: str,
+        mobile: str,
+        kind: str,
+        text: str,
+        send_id: str,
+        status: str,
+        detail: str = "",
+    ) -> None:
+        worksheet = self._all_worksheets().get(SMS_LOG_SHEET_NAME)
+        if worksheet is None:
+            self.ensure_sms_schema()
+            worksheet = self._all_worksheets().get(SMS_LOG_SHEET_NAME)
+        if worksheet is None:
+            return
+        stamp = jdatetime.datetime.now().strftime("%Y/%m/%d %H:%M")
+        kind_label = {
+            "new_task": "تسک جدید",
+            "overdue": "عقب‌افتاده",
+            "announce": "اطلاعیه",
+            "filming": "تصویر برداری",
+            "content": "تولید محتوا",
+        }.get(kind, kind)
+        worksheet.append_row(
+            [
+                stamp,
+                name,
+                mobile,
+                kind_label,
+                (text or "")[:500],
+                send_id,
+                status,
+                (detail or "")[:250],
+            ],
+            value_input_option="USER_ENTERED",
+        )
+
     def ensure_filming_schema(self) -> gspread.Worksheet:
         """Ensure the Meetings tab exists with the expected headers."""
         worksheet = self._get_or_rename_worksheet(FILMING_SHEET_NAME, FILMING_SHEET_ALIASES)
@@ -877,12 +1132,12 @@ class SheetsService:
             worksheet.append_row(FILMING_HEADERS, value_input_option="USER_ENTERED")
             logger.info("Created worksheet %s", FILMING_SHEET_NAME)
             self.invalidate_worksheet_cache()
-            self._ensure_project_column_dropdown(
-                worksheet,
-                header_aliases=FILMING_PROJECT_HEADER_ALIASES,
-                log_label="Meetings",
-            )
-            return worksheet
+        self._ensure_project_column_dropdown(
+            worksheet,
+            header_aliases=FILMING_PROJECT_HEADER_ALIASES,
+            log_label="Meetings",
+        )
+        return worksheet
 
         headers = [h.strip() for h in worksheet.row_values(1)]
         if not headers:
@@ -914,11 +1169,12 @@ class SheetsService:
                 worksheet.update_cell(1, start_col + offset, header)
             logger.info("Meetings sheet: added columns %s", missing)
 
-        self._ensure_project_column_dropdown(
-            worksheet,
-            header_aliases=FILMING_PROJECT_HEADER_ALIASES,
-            log_label="Meetings",
-        )
+        if missing or self._force_sheet_schema():
+            self._ensure_project_column_dropdown(
+                worksheet,
+                header_aliases=FILMING_PROJECT_HEADER_ALIASES,
+                log_label="Meetings",
+            )
         return worksheet
 
     def _filming_worksheet(self) -> gspread.Worksheet:
@@ -1019,12 +1275,10 @@ class SheetsService:
         return self._parse_filming_row(headers=headers, row=row_values, row_index=row_index)
 
     def update_filming_status(self, entry_id: str, personnel: Personnel, status: str) -> bool:
-        from services.auth import can_access_filming
+        from services.auth import can_update_filming_entry
 
-        if not can_access_filming(personnel):
-            return False
         entry = self.get_filming_entry_by_id(entry_id)
-        if entry is None:
+        if entry is None or not can_update_filming_entry(personnel, entry):
             return False
         worksheet = self._filming_worksheet()
         headers = worksheet.row_values(1)
@@ -1092,7 +1346,8 @@ class SheetsService:
                 worksheet.update_cell(1, start_col + offset, header)
             logger.info("Design sheet: added columns %s", missing)
 
-        self.ensure_design_project_dropdown(worksheet)
+        if missing or self._force_sheet_schema():
+            self.ensure_design_project_dropdown(worksheet)
         return worksheet
 
     def ensure_design_project_dropdown(self, worksheet: gspread.Worksheet | None = None) -> None:
@@ -1182,7 +1437,16 @@ class SheetsService:
                 continue
             seen.add(name)
             names.append(name)
-        return names or list(CONTENT_DESIGN_NAMES)
+        if names:
+            return names
+        flagged = [p.name for p in self.get_active_personnel() if p.content_access]
+        seen_flagged: set[str] = set()
+        unique_flagged: list[str] = []
+        for name in flagged:
+            if name and name not in seen_flagged:
+                seen_flagged.add(name)
+                unique_flagged.append(name)
+        return unique_flagged or list(CONTENT_DESIGN_NAMES)
 
     @staticmethod
     def _content_project_from_record(record: dict[str, str]) -> str:
@@ -1315,12 +1579,10 @@ class SheetsService:
         return self._parse_content_row(headers=headers, row=row_values, row_index=row_index)
 
     def update_content_status(self, entry_id: str, personnel: Personnel, status: str) -> bool:
-        from services.auth import can_access_content
+        from services.auth import can_update_content_entry
 
-        if not can_access_content(personnel):
-            return False
         entry = self.get_content_entry_by_id(entry_id)
-        if entry is None:
+        if entry is None or not can_update_content_entry(personnel, entry):
             return False
         worksheet = self._content_worksheet()
         headers = worksheet.row_values(1)
@@ -1350,42 +1612,7 @@ class SheetsService:
         exact = [m for m in matches if m.name.strip() == hint]
         return exact[0] if len(exact) == 1 else (matches[0] if matches else None)
 
-    @staticmethod
-    def _role_label(role: str) -> str:
-        return {
-            "admin": "مدیر",
-            "employee": "کارمند",
-            "senior_admin": "مدیر ارشد",
-        }.get(role, role)
-
-    @classmethod
-    def _personnel_from_record(cls, record: dict[str, str], telegram_id: int) -> Personnel:
-        """Build Personnel from a sheet row (supports English or Persian column names)."""
-        member_role = str(record.get("role", "employee")).strip().lower()
-        senior_admin = cls._parse_bool(
-            str(record.get("senior_admin", record.get("مدیر ارشد", "FALSE")))
-        )
-        view_all_tasks = cls._parse_bool(
-            str(record.get("view_all_tasks", record.get("مشاهده همه تسک", "FALSE")))
-        )
-        filming_access = cls._parse_bool(
-            str(record.get("filming_access", record.get("تصویر برداری", "FALSE")))
-        )
-        content_access = cls._parse_bool(
-            str(record.get("content_access", record.get("تولید محتوا", "FALSE")))
-        )
-        if member_role == "senior_admin":
-            senior_admin = True
-        return Personnel(
-            telegram_id=telegram_id,
-            name=str(record.get("name", "")).strip(),
-            role=member_role,
-            active=cls._record_is_active(record),
-            senior_admin=senior_admin,
-            view_all_tasks=view_all_tasks,
-            filming_access=filming_access,
-            content_access=content_access,
-        )
+    _personnel_from_record = staticmethod(personnel_from_record)
 
     def create_idea(self, personnel: Personnel, text: str) -> Idea:
         worksheet = self._ensure_ideas_worksheet()
@@ -1446,15 +1673,10 @@ class SheetsService:
         records = self._get_personnel_records()
         matches: list[Personnel] = []
         for record in records:
-            raw_id = str(record.get("telegram_id", "")).strip()
-            if not raw_id:
+            tid = self._record_telegram_id(record)
+            if tid != telegram_id:
                 continue
-            try:
-                if int(float(raw_id)) != telegram_id:
-                    continue
-            except (ValueError, TypeError):
-                continue
-            if not self._parse_bool(str(record.get("active", "TRUE"))):
+            if not self._record_is_active(record):
                 continue
             person = self._personnel_from_record(record, telegram_id)
             if role and person.role != role:
@@ -1462,15 +1684,20 @@ class SheetsService:
             matches.append(person)
         if not matches:
             return None
-        if role:
-            return matches[0]
+        chosen = matches[0]
+        if not role:
+            for member in matches:
+                if member.role == "admin":
+                    chosen = member
+                    break
+            else:
+                for member in matches:
+                    if member.senior_admin:
+                        chosen = member
+                        break
         for member in matches:
-            if member.role == "admin":
-                return member
-        for member in matches:
-            if member.senior_admin:
-                return member
-        return matches[0]
+            chosen = coalesce_personnel(chosen, member)
+        return chosen
 
     def get_broadcast_recipients(self) -> list[Personnel]:
         """All active Personnel rows with a valid Telegram id (private DM targets)."""
@@ -1486,10 +1713,8 @@ class SheetsService:
             existing = seen.get(tid)
             if existing is None:
                 seen[tid] = person
-            elif person.role == "admin" and existing.role != "admin":
-                seen[tid] = person
-            elif person.senior_admin and not existing.senior_admin:
-                seen[tid] = person
+            else:
+                seen[tid] = coalesce_personnel(existing, person)
         return sorted(seen.values(), key=lambda p: p.name)
 
     def get_active_personnel(self, role: str | None = None) -> list[Personnel]:
@@ -1507,10 +1732,8 @@ class SheetsService:
             existing = seen.get(tid)
             if existing is None:
                 seen[tid] = person
-            elif person.role == "admin" and existing.role != "admin":
-                seen[tid] = person
-            elif person.senior_admin and not existing.senior_admin:
-                seen[tid] = person
+            else:
+                seen[tid] = coalesce_personnel(existing, person)
         return sorted(seen.values(), key=lambda p: p.name)
 
     def get_active_employees(self) -> list[Personnel]:
@@ -1564,8 +1787,10 @@ class SheetsService:
             self._date_for_sheet(effective_due),
             priority,
             month,
+            self._status_to_sheet("pending"),
         ]
         main_row_index = self._insert_formatted_row(self._tasks_ws, main_row)
+        self._personal_tasks_cache = None
 
         personal_ws = self._personal_worksheet(assignee.name)
         uses_filter_mirror = (
@@ -1595,6 +1820,11 @@ class SheetsService:
 
         task_sheet = "Tasks" if uses_filter_mirror or personal_ws is None else assignee.name
         task_row = main_row_index if uses_filter_mirror or personal_ws is None else personal_row_index
+        task_gid = (
+            self._tasks_ws.id
+            if uses_filter_mirror or personal_ws is None
+            else personal_ws.id
+        )
 
         return Task(
             sheet_name=task_sheet,
@@ -1608,6 +1838,7 @@ class SheetsService:
             priority=priority,
             status="pending",
             description="",
+            sheet_gid=task_gid,
         )
 
     def _parse_task_row(
@@ -1617,12 +1848,18 @@ class SheetsService:
         headers: list[str],
         row: list[str],
         row_index: int,
+        sheet_gid: int = 0,
     ) -> Task | None:
         record = self._row_to_dict(headers, row)
         title = str(record.get("تسک", "")).strip()
         if not title:
             return None
-        assignee = str(record.get("مسوول تسک", "")).strip()
+        assignee = str(
+            record.get(
+                "مسوول تسک",
+                record.get("مسئول تسک", record.get("i", "")),
+            )
+        ).strip()
         status_raw = str(record.get("وضعیت", "")).strip()
         return Task(
             sheet_name=sheet_name,
@@ -1636,6 +1873,7 @@ class SheetsService:
             priority=str(record.get("اولویت", "")).strip(),
             status=self._normalize_status(status_raw),
             description=str(record.get("توضیحات", "")).strip(),
+            sheet_gid=sheet_gid,
         )
 
     def get_all_tasks(self, status: str | None = None) -> list[Task]:
@@ -1646,6 +1884,122 @@ class SheetsService:
                 continue
             tasks.extend(self.get_tasks_for_assignee(person, status=status))
         return tasks
+
+    def list_main_tasks(self) -> list[Task]:
+        """All rows from the Tasks tab, including done/cancelled (for reports)."""
+        all_values = self._tasks_ws.get_all_values()
+        if len(all_values) <= 1:
+            return []
+        headers = all_values[0]
+        tasks: list[Task] = []
+        for index, row in enumerate(all_values[1:], start=2):
+            task = self._parse_task_row(
+                sheet_name="Tasks",
+                headers=headers,
+                row=row,
+                row_index=index,
+                sheet_gid=int(self._tasks_ws.id),
+            )
+            if task is not None:
+                tasks.append(task)
+        personal = self._collect_personal_tasks()
+        if personal:
+            tasks = overlay_status_from_personal(tasks, personal)
+        return tasks
+
+    def _personal_worksheets(self) -> list[gspread.Worksheet]:
+        system = {normalize_sheet_title(name) for name in SYSTEM_TAB_ORDER}
+        found: list[gspread.Worksheet] = []
+        for title, worksheet in self._all_worksheets().items():
+            if normalize_sheet_title(title) in system:
+                continue
+            found.append(worksheet)
+        return found
+
+    def _collect_personal_tasks(self, *, force: bool = False) -> list[Task]:
+        now = time.monotonic()
+        if not force and self._personal_tasks_cache is not None:
+            cached_at, rows = self._personal_tasks_cache
+            if now - cached_at < PERSONNEL_CACHE_TTL_SEC:
+                return rows
+        collected: list[Task] = []
+        for worksheet in self._personal_worksheets():
+            if self._personal_sheet_uses_tasks_filter(worksheet):
+                continue
+            all_values = worksheet.get_all_values()
+            if len(all_values) <= 1:
+                continue
+            headers = all_values[0]
+            sheet_id = int(worksheet.id)
+            for index, row in enumerate(all_values[1:], start=2):
+                task = self._parse_task_row(
+                    sheet_name=worksheet.title,
+                    headers=headers,
+                    row=row,
+                    row_index=index,
+                    sheet_gid=sheet_id,
+                )
+                if task is not None:
+                    collected.append(task)
+        self._personal_tasks_cache = (now, collected)
+        return collected
+
+    def sync_tasks_status_from_personal(self) -> dict[str, int]:
+        """Write personal-tab وضعیت onto matching rows in Tasks."""
+        self.ensure_tasks_status_column()
+        all_values = self._tasks_ws.get_all_values()
+        if len(all_values) <= 1:
+            return {"updated": 0, "scanned": 0, "tabs": 0}
+        headers = [str(header).strip() for header in all_values[0]]
+        try:
+            status_col = headers.index(STATUS_HEADER) + 1
+        except ValueError:
+            return {"updated": 0, "scanned": 0, "tabs": 0}
+
+        main_tasks: list[Task] = []
+        for index, row in enumerate(all_values[1:], start=2):
+            task = self._parse_task_row(
+                sheet_name="Tasks",
+                headers=all_values[0],
+                row=row,
+                row_index=index,
+                sheet_gid=int(self._tasks_ws.id),
+            )
+            if task is not None:
+                main_tasks.append(task)
+
+        personal = self._collect_personal_tasks(force=True)
+        merged = overlay_status_from_personal(main_tasks, personal)
+        by_row = {task.row_index: task.status for task in merged}
+        original = {task.row_index: task.status for task in main_tasks}
+        updates: list[dict] = []
+        col_letter = _col_to_a1(status_col)
+        for row_index, status in by_row.items():
+            if original.get(row_index) == status:
+                continue
+            updates.append(
+                {
+                    "range": f"{col_letter}{row_index}",
+                    "values": [[self._status_to_sheet(status)]],
+                }
+            )
+
+        chunk_size = 80
+        for start in range(0, len(updates), chunk_size):
+            chunk = updates[start : start + chunk_size]
+            self._tasks_ws.batch_update(chunk, value_input_option="USER_ENTERED")
+
+        logger.info(
+            "Tasks status synced from personal tabs: updated=%s scanned=%s tabs=%s",
+            len(updates),
+            len(personal),
+            len(self._personal_worksheets()),
+        )
+        return {
+            "updated": len(updates),
+            "scanned": len(personal),
+            "tabs": len(self._personal_worksheets()),
+        }
 
     def get_tasks_for_personnel(self, personnel: Personnel, status: str | None = None) -> list[Task]:
         """Tasks visible to this user (own tasks, or all if senior admin with view_all_tasks)."""
@@ -1694,6 +2048,7 @@ class SheetsService:
                 headers=actual_headers if actual_headers else headers,
                 row=row,
                 row_index=index,
+                sheet_gid=int(worksheet.id),
             )
             if task is None:
                 continue
@@ -1707,19 +2062,73 @@ class SheetsService:
             tasks.append(task)
         return tasks
 
-    def _find_task_by_id(self, task_id: str) -> Task | None:
-        """Resolve a task id (sheet:row) without filtering by assignee."""
-        try:
-            sheet_name, row_str = task_id.split(":", 1)
-            row_index = int(row_str)
-        except ValueError:
-            return None
+    def _worksheet_by_gid(self, sheet_gid: int) -> gspread.Worksheet | None:
+        if int(self._tasks_ws.id) == sheet_gid:
+            return self._tasks_ws
+        for worksheet in self._all_worksheets().values():
+            if int(worksheet.id) == sheet_gid:
+                return worksheet
+        return None
 
-        if sheet_name == "Tasks":
+    def _write_status_cell(
+        self,
+        worksheet: gspread.Worksheet,
+        row_index: int,
+        status: str,
+        *,
+        create_column: bool = False,
+    ) -> bool:
+        headers = [str(h).strip() for h in worksheet.row_values(1)]
+        try:
+            status_col = headers.index(STATUS_HEADER) + 1
+        except ValueError:
+            if not create_column:
+                return False
+            status_col = len(headers) + 1
+            if worksheet.col_count < status_col:
+                worksheet.add_cols(status_col - worksheet.col_count)
+            worksheet.update_cell(1, status_col, STATUS_HEADER)
+        worksheet.update_cell(row_index, status_col, self._status_to_sheet(status))
+        return True
+
+    def _tasks_row_for(self, task: Task) -> int | None:
+        if task.sheet_name == "Tasks" or (
+            task.sheet_gid and int(task.sheet_gid) == int(self._tasks_ws.id)
+        ):
+            return task.row_index
+        all_values = self._tasks_ws.get_all_values()
+        if len(all_values) <= 1:
+            return None
+        headers = all_values[0] or TASKS_HEADERS
+        want = self._task_match_key(task.title, task.assignee_name, task.due_date)
+        for index, row in enumerate(all_values[1:], start=2):
+            parsed = self._parse_task_row(
+                sheet_name="Tasks",
+                headers=headers,
+                row=row,
+                row_index=index,
+                sheet_gid=int(self._tasks_ws.id),
+            )
+            if parsed is None:
+                continue
+            if self._task_match_key(parsed.title, parsed.assignee_name, parsed.due_date) == want:
+                return index
+        return None
+
+    def _find_task_by_id(self, task_id: str) -> Task | None:
+        """Resolve a compact ``t:gid:row`` id, or a legacy ``sheet:row`` id."""
+        parsed = parse_task_id(task_id)
+        if parsed is None:
+            return None
+        sheet_gid, sheet_name, row_index = parsed
+        if sheet_gid is not None:
+            worksheet = self._worksheet_by_gid(sheet_gid)
+            headers = TASKS_HEADERS if worksheet is self._tasks_ws else PERSONAL_HEADERS
+        elif sheet_name == "Tasks":
             worksheet = self._tasks_ws
             headers = TASKS_HEADERS
         else:
-            worksheet = self._personal_worksheet(sheet_name)
+            worksheet = self._personal_worksheet(sheet_name or "")
             headers = PERSONAL_HEADERS
         if worksheet is None:
             return None
@@ -1729,68 +2138,165 @@ class SheetsService:
             return None
         actual_headers = worksheet.row_values(1)
         return self._parse_task_row(
-            sheet_name=sheet_name,
+            sheet_name=worksheet.title,
             headers=actual_headers if actual_headers else headers,
             row=row_values,
             row_index=row_index,
+            sheet_gid=int(worksheet.id),
         )
 
     def get_task_by_id(self, task_id: str, personnel: Personnel) -> Task | None:
-        from services.auth import can_view_all_tasks
+        from services.auth import can_view_all_tasks, is_admin
 
-        if can_view_all_tasks(personnel):
-            task = self._find_task_by_id(task_id)
-            if task is not None:
-                return task
-
-        for task in self.get_tasks_for_assignee(personnel, status=None):
-            if task.id == task_id:
-                return task
-        for task in self.get_tasks_for_assignee(personnel, status="done"):
-            if task.id == task_id:
-                return task
-        for task in self.get_tasks_for_assignee(personnel, status="cancelled"):
-            if task.id == task_id:
-                return task
+        task = self._find_task_by_id(task_id)
+        if task is None:
+            return None
+        if can_view_all_tasks(personnel) or is_admin(personnel):
+            return task
+        if task.assignee_name == personnel.name:
+            return task
         return None
 
     def update_task_status(self, task_id: str, personnel: Personnel, status: str) -> bool:
-        from services.auth import is_admin
+        from services.auth import is_admin, is_senior_admin
 
         task = self.get_task_by_id(task_id, personnel)
         if task is None:
             return False
-        # Only the assignee (or full admin) may change task status.
-        if task.assignee_name != personnel.name and not is_admin(personnel):
+        if (
+            task.assignee_name != personnel.name
+            and not is_admin(personnel)
+            and not is_senior_admin(personnel)
+        ):
             return False
 
-        sheet_value = self._status_to_sheet(status)
+        self._personal_tasks_cache = None
+        updated = False
         personal_ws = self._personal_worksheet(task.assignee_name)
         if personal_ws is not None:
-            headers = personal_ws.row_values(1)
-            try:
-                status_col = headers.index("وضعیت") + 1
-            except ValueError:
-                return False
             # Only touch وضعیت — FILTER mirror tabs must not overwrite A:G spill.
-            personal_ws.update_cell(task.row_index, status_col, sheet_value)
-            return True
+            target_row = (
+                task.row_index
+                if (not task.sheet_gid or int(task.sheet_gid) == int(personal_ws.id))
+                else None
+            )
+            if target_row is None and not self._personal_sheet_uses_tasks_filter(personal_ws):
+                target_row = task.row_index
+            if target_row is not None:
+                if self._write_status_cell(personal_ws, target_row, status):
+                    updated = True
 
-        return False
+        tasks_row = self._tasks_row_for(task)
+        if tasks_row is not None:
+            if self._write_status_cell(self._tasks_ws, tasks_row, status, create_column=True):
+                updated = True
+        elif personal_ws is None:
+            if self._write_status_cell(
+                self._tasks_ws, task.row_index, status, create_column=True
+            ):
+                updated = True
 
-    @staticmethod
-    def _parse_due_as_jalali(value: str) -> jdatetime.date | None:
-        """Parse a sheet due-date cell into a Jalali date (or None)."""
-        normalized = SheetsService.validate_shamsi_date(value)
-        if not normalized:
-            return None
-        year, month, day = (int(p) for p in normalized.split("/"))
-        return jdatetime.date(year, month, day)
+        return updated
 
-    @staticmethod
-    def _task_match_key(title: str, assignee: str, due_date: str) -> str:
-        due = SheetsService.validate_shamsi_date(due_date) or due_date.strip().lstrip("'")
-        return f"{assignee.strip().lower()}|{title.strip().lower()}|{due}"
+    def _write_task_field(
+        self,
+        worksheet: gspread.Worksheet,
+        row_index: int,
+        header_name: str,
+        value: str,
+        *,
+        create_column: bool = False,
+    ) -> bool:
+        headers = [str(h).strip() for h in worksheet.row_values(1)]
+        try:
+            col = headers.index(header_name) + 1
+        except ValueError:
+            if not create_column:
+                return False
+            col = len(headers) + 1
+            if worksheet.col_count < col:
+                worksheet.add_cols(col - worksheet.col_count)
+            worksheet.update_cell(1, col, header_name)
+        worksheet.update_cell(row_index, col, value)
+        return True
+
+    def update_task_note(self, task_id: str, personnel: Personnel, note: str) -> bool:
+        task = self.get_task_by_id(task_id, personnel)
+        if task is None:
+            return False
+        self._personal_tasks_cache = None
+        updated = False
+        personal_ws = self._personal_worksheet(task.assignee_name)
+        if personal_ws is not None:
+            target_row = (
+                task.row_index
+                if (not task.sheet_gid or int(task.sheet_gid) == int(personal_ws.id))
+                else None
+            )
+            if target_row is None and not self._personal_sheet_uses_tasks_filter(personal_ws):
+                target_row = task.row_index
+            if target_row is not None:
+                if self._write_task_field(personal_ws, target_row, "توضیحات", note, create_column=True):
+                    updated = True
+        tasks_row = self._tasks_row_for(task)
+        if tasks_row is not None:
+            if self._write_task_field(self._tasks_ws, tasks_row, "توضیحات", note, create_column=True):
+                updated = True
+        return updated
+
+    def update_task_due_date(self, task_id: str, personnel: Personnel, due_date: str) -> bool:
+        from services.auth import is_admin, is_senior_admin
+
+        task = self.get_task_by_id(task_id, personnel)
+        if task is None or not (is_admin(personnel) or is_senior_admin(personnel)):
+            return False
+        self._personal_tasks_cache = None
+        updated = False
+        tasks_row = self._tasks_row_for(task)
+        if tasks_row is not None:
+            if self._write_task_field(self._tasks_ws, tasks_row, "ددلاین", due_date):
+                updated = True
+        personal_ws = self._personal_worksheet(task.assignee_name)
+        if personal_ws is not None and not self._personal_sheet_uses_tasks_filter(personal_ws):
+            target_row = (
+                task.row_index
+                if (not task.sheet_gid or int(task.sheet_gid) == int(personal_ws.id))
+                else None
+            )
+            if target_row is not None:
+                if self._write_task_field(personal_ws, target_row, "ددلاین", due_date):
+                    updated = True
+        return updated
+
+    def update_task_priority(self, task_id: str, personnel: Personnel, priority: str) -> bool:
+        from services.auth import is_admin, is_senior_admin
+
+        task = self.get_task_by_id(task_id, personnel)
+        if task is None or not (is_admin(personnel) or is_senior_admin(personnel)):
+            return False
+        if priority not in PRIORITIES:
+            return False
+        self._personal_tasks_cache = None
+        updated = False
+        tasks_row = self._tasks_row_for(task)
+        if tasks_row is not None:
+            if self._write_task_field(self._tasks_ws, tasks_row, "اولویت", priority):
+                updated = True
+        personal_ws = self._personal_worksheet(task.assignee_name)
+        if personal_ws is not None and not self._personal_sheet_uses_tasks_filter(personal_ws):
+            target_row = (
+                task.row_index
+                if (not task.sheet_gid or int(task.sheet_gid) == int(personal_ws.id))
+                else None
+            )
+            if target_row is not None:
+                if self._write_task_field(personal_ws, target_row, "اولویت", priority):
+                    updated = True
+        return updated
+
+    def get_open_tasks_count(self, personnel: Personnel) -> int:
+        tasks = self.get_tasks_for_assignee(personnel, status=None)
+        return sum(1 for t in tasks if t.status not in ("done", "cancelled"))
 
     def list_overdue_open_tasks(self) -> list[Task]:
         """Open (not done) tasks whose Jalali due date is before today."""
@@ -1837,8 +2343,8 @@ class SheetsService:
             }
         }
 
-    def sync_overdue_row_colors(self) -> dict[str, int]:
-        """Paint overdue *open* rows red on Tasks (+ legacy personal); clear others.
+    def sync_overdue_row_colors(self) -> tuple[dict[str, int], list[Task]]:
+        """Paint newly overdue open rows; unpaint rows that are no longer overdue.
 
         FILTER personal tabs are never written (spill ranges). Returns counts.
         """
@@ -1847,9 +2353,7 @@ class SheetsService:
         overdue_keys = {
             self._task_match_key(t.title, t.assignee_name, t.due_date) for t in overdue_open
         }
-        requests: list[dict] = []
-        painted = 0
-        cleared = 0
+        wanted_red: dict[tuple[int, int], int] = {}
 
         def _process_worksheet(
             worksheet: gspread.Worksheet,
@@ -1857,7 +2361,6 @@ class SheetsService:
             *,
             allow_write: bool,
         ) -> None:
-            nonlocal painted, cleared
             if not allow_write:
                 return
             all_values = worksheet.get_all_values()
@@ -1865,12 +2368,14 @@ class SheetsService:
                 return
             actual_headers = all_values[0] or headers
             col_count = max(len(actual_headers), len(headers), 8)
+            sheet_id = int(worksheet.id)
             for index, row in enumerate(all_values[1:], start=2):
                 task = self._parse_task_row(
                     sheet_name=worksheet.title,
                     headers=actual_headers,
                     row=row,
                     row_index=index,
+                    sheet_gid=sheet_id,
                 )
                 if task is None:
                     continue
@@ -1878,19 +2383,8 @@ class SheetsService:
                     self._task_match_key(task.title, task.assignee_name, task.due_date)
                     in overdue_keys
                 )
-                color = overdue_color if is_overdue else None
-                requests.append(
-                    self._row_color_request(
-                        sheet_id=worksheet.id,
-                        row_index=index,
-                        col_count=col_count,
-                        color=color,
-                    )
-                )
                 if is_overdue:
-                    painted += 1
-                else:
-                    cleared += 1
+                    wanted_red[(sheet_id, index)] = col_count
 
         _process_worksheet(self._tasks_ws, TASKS_HEADERS, allow_write=True)
 
@@ -1904,20 +2398,50 @@ class SheetsService:
                 continue
             _process_worksheet(personal_ws, PERSONAL_HEADERS, allow_write=True)
 
+        requests: list[dict] = []
+        for key, col_count in wanted_red.items():
+            if key in self._overdue_red_rows:
+                continue
+            sheet_id, row_index = key
+            requests.append(
+                self._row_color_request(
+                    sheet_id=sheet_id,
+                    row_index=row_index,
+                    col_count=col_count,
+                    color=overdue_color,
+                )
+            )
+        for key, col_count in self._overdue_red_rows.items():
+            if key in wanted_red:
+                continue
+            sheet_id, row_index = key
+            requests.append(
+                self._row_color_request(
+                    sheet_id=sheet_id,
+                    row_index=row_index,
+                    col_count=col_count,
+                    color=None,
+                )
+            )
+
+        painted = sum(1 for key in wanted_red if key not in self._overdue_red_rows)
+        cleared = sum(1 for key in self._overdue_red_rows if key not in wanted_red)
+
         chunk_size = 40
         for start in range(0, len(requests), chunk_size):
             chunk = requests[start : start + chunk_size]
             try:
                 self._spreadsheet.batch_update({"requests": chunk})
-            except Exception as exc:
-                logger.warning("Overdue color batch failed (%d requests): %s", len(chunk), exc)
+            except Exception as extra:
+                logger.warning("Overdue color batch failed (%d requests): %s", len(chunk), extra)
 
+        self._overdue_red_rows = wanted_red
         return {
             "painted": painted,
             "cleared": cleared,
             "requests": len(requests),
             "overdue_open": len(overdue_open),
-        }
+        }, overdue_open
 
     def get_sheet_url(self, personnel: Personnel) -> str:
         """Return a direct link to the most relevant worksheet tab for this user."""

@@ -12,6 +12,21 @@ class CreateTaskStates(StatesGroup):
     choosing_priority = State()
     choosing_due_date = State()
     entering_due_date_manual = State()
+    confirming = State()
+
+
+class TaskNoteStates(StatesGroup):
+    """Adding or editing a task description/note."""
+
+    entering_note = State()
+
+
+class TaskEditStates(StatesGroup):
+    """Admin editing task due date or priority."""
+
+    choosing_due_date = State()
+    entering_due_date_manual = State()
+    choosing_priority = State()
 
 
 class IdeaStates(StatesGroup):

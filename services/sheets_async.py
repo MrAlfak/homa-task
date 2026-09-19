@@ -12,6 +12,7 @@ from gspread.exceptions import APIError
 
 from services.auth import AuthResult, authorize_user
 from services.sheets import ContentEntry, FilmingEntry, Idea, Personnel, Task, get_sheets_service
+from services.sheets_models import resolve_shamsi_date_offset, validate_shamsi_date
 
 logger = logging.getLogger(__name__)
 
@@ -24,6 +25,7 @@ T = TypeVar("T")
 _TRANSIENT_API_CODES = {429, 500, 502, 503, 504}
 _RETRY_ATTEMPTS = 3
 _RETRY_BASE_DELAY = 0.6
+_sheets_lock = asyncio.Lock()
 
 
 def _is_transient_api_error(exc: APIError) -> bool:
@@ -44,16 +46,17 @@ async def run_blocking(func: Callable[..., T], /, *args, **kwargs) -> T:
     """
     last_exc: Exception | None = None
     for attempt in range(_RETRY_ATTEMPTS):
-        try:
-            return await asyncio.to_thread(func, *args, **kwargs)
-        except APIError as exc:
-            last_exc = exc
-            if not _is_transient_api_error(exc) or attempt == _RETRY_ATTEMPTS - 1:
-                raise
-        except (requests.exceptions.RequestException, TimeoutError, ConnectionError) as exc:
-            last_exc = exc
-            if attempt == _RETRY_ATTEMPTS - 1:
-                raise
+        async with _sheets_lock:
+            try:
+                return await asyncio.to_thread(func, *args, **kwargs)
+            except APIError as exc:
+                last_exc = exc
+                if not _is_transient_api_error(exc) or attempt == _RETRY_ATTEMPTS - 1:
+                    raise
+            except (requests.exceptions.RequestException, TimeoutError, ConnectionError) as exc:
+                last_exc = exc
+                if attempt == _RETRY_ATTEMPTS - 1:
+                    raise
         delay = _RETRY_BASE_DELAY * (attempt + 1)
         logger.warning(
             "Sheets call %s failed (attempt %d/%d): %s — retrying in %.1fs",
@@ -76,7 +79,8 @@ async def run_once(func: Callable[..., T], /, *args, **kwargs) -> T:
     silently create a duplicate row. Let the caller decide whether to ask the
     user to retry instead of guessing.
     """
-    return await asyncio.to_thread(func, *args, **kwargs)
+    async with _sheets_lock:
+        return await asyncio.to_thread(func, *args, **kwargs)
 
 
 async def authorize(telegram_id: int) -> AuthResult:
@@ -127,12 +131,36 @@ class SheetsAsync:
         return await run_blocking(cls._svc().get_tasks_for_assignee, personnel, status)
 
     @classmethod
+    async def list_main_tasks(cls) -> list[Task]:
+        return await run_blocking(cls._svc().list_main_tasks)
+
+    @classmethod
+    async def sync_tasks_status_from_personal(cls) -> dict[str, int]:
+        return await run_blocking(cls._svc().sync_tasks_status_from_personal)
+
+    @classmethod
     async def get_task_by_id(cls, task_id: str, personnel: Personnel) -> Task | None:
         return await run_blocking(cls._svc().get_task_by_id, task_id, personnel)
 
     @classmethod
     async def update_task_status(cls, task_id: str, personnel: Personnel, status: str) -> bool:
         return await run_blocking(cls._svc().update_task_status, task_id, personnel, status)
+
+    @classmethod
+    async def update_task_note(cls, task_id: str, personnel: Personnel, note: str) -> bool:
+        return await run_blocking(cls._svc().update_task_note, task_id, personnel, note)
+
+    @classmethod
+    async def update_task_due_date(cls, task_id: str, personnel: Personnel, due_date: str) -> bool:
+        return await run_blocking(cls._svc().update_task_due_date, task_id, personnel, due_date)
+
+    @classmethod
+    async def update_task_priority(cls, task_id: str, personnel: Personnel, priority: str) -> bool:
+        return await run_blocking(cls._svc().update_task_priority, task_id, personnel, priority)
+
+    @classmethod
+    async def get_open_tasks_count(cls, personnel: Personnel) -> int:
+        return await run_blocking(cls._svc().get_open_tasks_count, personnel)
 
     @classmethod
     async def create_task(
@@ -158,6 +186,19 @@ class SheetsAsync:
         )
 
     @classmethod
+    async def list_template_entries(cls):
+        return await run_blocking(cls._svc().list_template_entries)
+
+    @classmethod
+    async def update_template_run(cls, row_index: int, *, last_run: str, next_run: str) -> None:
+        await run_once(
+            cls._svc().update_template_run,
+            row_index,
+            last_run=last_run,
+            next_run=next_run,
+        )
+
+    @classmethod
     async def create_idea(cls, personnel: Personnel, text: str) -> Idea:
         # Not retried — see create_task's comment (avoids duplicate idea rows).
         return await run_once(cls._svc().create_idea, personnel, text)
@@ -179,7 +220,7 @@ class SheetsAsync:
         return await run_blocking(cls._svc().list_overdue_open_tasks)
 
     @classmethod
-    async def sync_overdue_row_colors(cls) -> dict[str, int]:
+    async def sync_overdue_row_colors(cls) -> tuple[dict[str, int], list[Task]]:
         return await run_blocking(cls._svc().sync_overdue_row_colors)
 
     @classmethod
@@ -269,9 +310,36 @@ class SheetsAsync:
         return await run_blocking(cls._svc().find_personnel_by_name_hint, name_hint)
 
     @classmethod
+    async def get_sms_settings(cls):
+        return await run_blocking(cls._svc().get_sms_settings)
+
+    @classmethod
+    async def append_sms_log(
+        cls,
+        *,
+        name: str,
+        mobile: str,
+        kind: str,
+        text: str,
+        send_id: str,
+        status: str,
+        detail: str = "",
+    ) -> None:
+        await run_once(
+            cls._svc().append_sms_log,
+            name=name,
+            mobile=mobile,
+            kind=kind,
+            text=text,
+            send_id=send_id,
+            status=status,
+            detail=detail,
+        )
+
+    @classmethod
     async def resolve_shamsi_date_offset(cls, day_offset: int) -> str | None:
-        return await run_blocking(cls._svc().resolve_shamsi_date_offset, day_offset)
+        return resolve_shamsi_date_offset(day_offset)
 
     @classmethod
     async def validate_shamsi_date(cls, value: str) -> str | None:
-        return await run_blocking(cls._svc().validate_shamsi_date, value)
+        return validate_shamsi_date(value)

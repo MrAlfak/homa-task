@@ -1,0 +1,12 @@
+services:
+  homa:
+    image: homa-task-bot-qsnkoy:latest
+    pull_policy: never
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun
+    restart: unless-stopped
+    env_file:
+      - .env

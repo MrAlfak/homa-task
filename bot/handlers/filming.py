@@ -8,11 +8,13 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from bot.create_task_flow import safe_answer, safe_edit_text
+from bot.create_task_flow import FLOW_EXPIRED_GENERIC, safe_answer, safe_edit_text
 from bot.formatting import esc
 from bot.keyboards import (
     FILMING_TEXTS,
+    REPLY_MENU_TEXTS,
     STATUS_LABELS,
+    cancel_flow_keyboard,
     filming_date_inline_keyboard,
     filming_detail_keyboard,
     filming_list_keyboard,
@@ -23,7 +25,7 @@ from bot.keyboards import (
     main_menu_keyboard,
 )
 from bot.states import FilmingStates
-from services.auth import can_access_filming
+from services.auth import can_access_filming, can_update_filming_entry
 from services.sheets import FilmingEntry, Personnel
 from services.sheets_async import SheetsAsync, authorize
 
@@ -149,6 +151,27 @@ async def filming_start_create(callback: CallbackQuery, state: FSMContext) -> No
     )
 
 
+@router.callback_query(F.data.startswith("filmpage:"), FilmingStates.choosing_project)
+async def filming_project_page(callback: CallbackQuery, state: FSMContext) -> None:
+    if callback.message is None or callback.from_user is None:
+        return
+    await callback.answer()
+    if await _require_filming(callback.from_user.id) is None:
+        return
+    data = await state.get_data()
+    projects: list[str] = data.get("project_list", [])
+    try:
+        page = int(callback.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        page = 0
+    await safe_edit_text(
+        callback.message,
+        "📁 <b>نام پروژه</b> را انتخاب کنید:",
+        parse_mode="HTML",
+        reply_markup=filming_projects_inline_keyboard(projects, page=page),
+    )
+
+
 @router.callback_query(F.data.startswith("filmproject:"), FilmingStates.choosing_project)
 async def filming_project_selected(callback: CallbackQuery, state: FSMContext) -> None:
     if callback.message is None or callback.from_user is None:
@@ -174,10 +197,11 @@ async def filming_project_selected(callback: CallbackQuery, state: FSMContext) -
         callback.message,
         f"📁 پروژه: <b>{esc(projects[index])}</b>\n\n📍 <b>محل فیلم برداری</b> را بنویسید:",
         parse_mode="HTML",
+        reply_markup=cancel_flow_keyboard("film:cancel"),
     )
 
 
-@router.message(FilmingStates.entering_location, F.text)
+@router.message(FilmingStates.entering_location, F.text, ~F.text.in_(REPLY_MENU_TEXTS))
 async def filming_location_entered(message: Message, state: FSMContext) -> None:
     if await _require_filming(message) is None:
         await state.clear()
@@ -205,10 +229,11 @@ async def filming_day_selected(callback: CallbackQuery, state: FSMContext) -> No
         callback.message,
         f"📆 روز: <b>{esc(day)}</b>\n\n🕐 <b>ساعت</b> را بنویسید (مثلاً ۱۴:۳۰):",
         parse_mode="HTML",
+        reply_markup=cancel_flow_keyboard("film:cancel"),
     )
 
 
-@router.message(FilmingStates.entering_hour, F.text)
+@router.message(FilmingStates.entering_hour, F.text, ~F.text.in_(REPLY_MENU_TEXTS))
 async def filming_hour_entered(message: Message, state: FSMContext) -> None:
     if await _require_filming(message) is None:
         await state.clear()
@@ -220,7 +245,8 @@ async def filming_hour_entered(message: Message, state: FSMContext) -> None:
     await state.update_data(hour=hour)
     await state.set_state(FilmingStates.choosing_date)
     await message.answer(
-        f"🕐 ساعت: <b>{esc(hour)}</b>\n\n📅 <b>تاریخ</b> را انتخاب کنید:",
+        f"🕐 ساعت: <b>{esc(hour)}</b>\n\n"
+        "📅 تاریخ را از هفته پیش‌رو انتخاب کنید، یا دستی بنویسید:",
         parse_mode="HTML",
         reply_markup=filming_date_inline_keyboard(),
     )
@@ -242,6 +268,7 @@ async def filming_date_selected(callback: CallbackQuery, state: FSMContext) -> N
             callback.message,
             "✏️ تاریخ شمسی را بنویسید، مثلاً:\n<code>1405/04/09</code>",
             parse_mode="HTML",
+            reply_markup=cancel_flow_keyboard("film:cancel"),
         )
         return
 
@@ -261,7 +288,7 @@ async def filming_date_selected(callback: CallbackQuery, state: FSMContext) -> N
     await _ask_assignee(callback.message, state)
 
 
-@router.message(FilmingStates.entering_date_manual, F.text)
+@router.message(FilmingStates.entering_date_manual, F.text, ~F.text.in_(REPLY_MENU_TEXTS))
 async def filming_date_manual(message: Message, state: FSMContext) -> None:
     if await _require_filming(message) is None:
         await state.clear()
@@ -379,6 +406,13 @@ async def filming_assignee_selected(callback: CallbackQuery, state: FSMContext) 
             parse_mode="HTML",
         )
 
+    try:
+        from services.sms import notify_filming, schedule
+
+        schedule(notify_filming(assignee, entry))
+    except Exception:
+        logger.warning("SMS filming schedule failed", exc_info=True)
+
 
 @router.callback_query(F.data == "film:list")
 async def filming_list(callback: CallbackQuery, state: FSMContext) -> None:
@@ -414,7 +448,7 @@ async def filming_view(callback: CallbackQuery) -> None:
         await callback.message.answer("مورد یافت نشد.")
         return
 
-    can_update = can_access_filming(personnel)
+    can_update = can_update_filming_entry(personnel, entry)
     await safe_edit_text(
         callback.message,
         _format_entry(entry),
@@ -453,7 +487,7 @@ async def filming_status(callback: CallbackQuery) -> None:
         await callback.message.answer("مورد یافت نشد.")
         return
 
-    can_update = can_access_filming(personnel)
+    can_update = can_update_filming_entry(personnel, entry)
     await safe_edit_text(
         callback.message,
         _format_entry(entry),
@@ -464,3 +498,18 @@ async def filming_status(callback: CallbackQuery) -> None:
             status=entry.status,
         ),
     )
+
+
+@router.callback_query(
+    F.data.startswith("filmpage:")
+    | F.data.startswith("filmproject:")
+    | F.data.startswith("filmday:")
+    | F.data.startswith("filmdate:")
+    | F.data.startswith("filmassign:")
+)
+async def filming_stale_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    if callback.message is None:
+        return
+    await callback.answer()
+    await state.clear()
+    await safe_answer(callback.message, FLOW_EXPIRED_GENERIC)

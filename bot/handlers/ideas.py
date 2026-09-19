@@ -7,7 +7,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
 from bot.formatting import esc
-from bot.keyboards import IDEAS_TEXTS, cancel_idea_keyboard, ideas_menu_keyboard
+from bot.keyboards import IDEAS_TEXTS, REPLY_MENU_TEXTS, cancel_idea_keyboard, ideas_menu_keyboard
 from bot.states import IdeaStates
 from services.sheets_async import SheetsAsync, authorize
 
@@ -55,7 +55,7 @@ async def start_new_idea(callback: CallbackQuery, state: FSMContext) -> None:
     )
 
 
-@router.message(IdeaStates.entering_idea, F.text)
+@router.message(IdeaStates.entering_idea, F.text, ~F.text.in_(REPLY_MENU_TEXTS))
 async def save_idea(message: Message, state: FSMContext) -> None:
     if message.from_user is None:
         return

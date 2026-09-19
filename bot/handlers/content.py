@@ -8,7 +8,7 @@ from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
-from bot.create_task_flow import safe_answer, safe_edit_text
+from bot.create_task_flow import FLOW_EXPIRED_GENERIC, safe_answer, safe_edit_text
 from bot.formatting import esc
 from bot.keyboards import (
     CONTENT_TEXTS,
@@ -22,7 +22,7 @@ from bot.keyboards import (
     main_menu_keyboard,
 )
 from bot.states import ContentStates
-from services.auth import can_access_content
+from services.auth import can_access_content, can_update_content_entry
 from services.sheets import ContentEntry, Personnel
 from services.sheets_async import SheetsAsync, authorize
 
@@ -182,6 +182,27 @@ async def content_person_selected(callback: CallbackQuery, state: FSMContext) ->
     )
 
 
+@router.callback_query(F.data.startswith("contentpage:"), ContentStates.choosing_project)
+async def content_project_page(callback: CallbackQuery, state: FSMContext) -> None:
+    if callback.message is None or callback.from_user is None:
+        return
+    await callback.answer()
+    if await _require_content(callback.from_user.id) is None:
+        return
+    data = await state.get_data()
+    projects: list[str] = data.get("project_list", [])
+    try:
+        page = int(callback.data.split(":", 1)[1])
+    except (ValueError, IndexError):
+        page = 0
+    await safe_edit_text(
+        callback.message,
+        f"👤 نام: <b>{esc(data.get('person_name', ''))}</b>\n\n📁 <b>پروژه</b> را انتخاب کنید:",
+        parse_mode="HTML",
+        reply_markup=content_projects_inline_keyboard(projects, page=page),
+    )
+
+
 @router.callback_query(F.data.startswith("contentproject:"), ContentStates.choosing_project)
 async def content_project_selected(callback: CallbackQuery, state: FSMContext) -> None:
     if callback.message is None or callback.from_user is None:
@@ -287,6 +308,12 @@ async def content_type_selected(callback: CallbackQuery, state: FSMContext) -> N
                 f"⚠️ ثبت شد، ولی اعلان به <b>{esc(assignee.name)}</b> ارسال نشد.",
                 parse_mode="HTML",
             )
+        try:
+            from services.sms import notify_content, schedule
+
+            schedule(notify_content(assignee, entry))
+        except Exception:
+            logger.warning("SMS content schedule failed", exc_info=True)
 
 
 @router.callback_query(F.data == "content:list")
@@ -329,7 +356,7 @@ async def content_view(callback: CallbackQuery) -> None:
         parse_mode="HTML",
         reply_markup=content_detail_keyboard(
             entry.id,
-            can_update=can_access_content(personnel),
+            can_update=can_update_content_entry(personnel, entry),
             status=entry.status,
         ),
     )
@@ -367,7 +394,21 @@ async def content_status(callback: CallbackQuery) -> None:
         parse_mode="HTML",
         reply_markup=content_detail_keyboard(
             entry.id,
-            can_update=can_access_content(personnel),
+            can_update=can_update_content_entry(personnel, entry),
             status=entry.status,
         ),
     )
+
+
+@router.callback_query(
+    F.data.startswith("contentperson:")
+    | F.data.startswith("contentpage:")
+    | F.data.startswith("contentproject:")
+    | F.data.startswith("contenttype:")
+)
+async def content_stale_callback(callback: CallbackQuery, state: FSMContext) -> None:
+    if callback.message is None:
+        return
+    await callback.answer()
+    await state.clear()
+    await safe_answer(callback.message, FLOW_EXPIRED_GENERIC)

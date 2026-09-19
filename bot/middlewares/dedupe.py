@@ -11,8 +11,9 @@ Two related problems this middleware fixes:
    already struggling, and risking duplicate task/idea rows. Now, while a
    user's previous update is still being processed, any new update from that
    same user is held off (with a light "still working" hint) instead of
-   starting a concurrent run. A stale-lock timeout guarantees a user can
-   never get permanently stuck if a handler hangs.
+   starting a concurrent run. The busy lock is held until the handler
+   returns — a timed "stale" unlock previously allowed a second submit
+   while Google Sheets was still writing the first task.
 
 IMPORTANT: register a single shared instance for both ``dp.message`` and
 ``dp.callback_query`` (see ``bot/main.py``) so the busy-lock covers a user
@@ -30,11 +31,6 @@ from aiogram import BaseMiddleware
 from aiogram.types import CallbackQuery, Message, TelegramObject
 
 logger = logging.getLogger(__name__)
-
-# Safety valve: if a handler is somehow still "busy" after this long (should
-# never happen — Sheets calls have their own retry/timeout), stop blocking the
-# user rather than locking them out until a restart.
-BUSY_STALE_AFTER_SEC = 25.0
 
 # Periodic cleanup so the per-user dicts don't grow forever over a long
 # uptime (they're process memory only, never persisted).
@@ -103,8 +99,7 @@ class DuplicateTapMiddleware(BaseMiddleware):
 
         uid = self._user_id(event)
         if uid is not None:
-            busy_since = self._busy_since.get(uid)
-            if busy_since is not None and (now - busy_since) < BUSY_STALE_AFTER_SEC:
+            if uid in self._busy_since:
                 logger.info("Holding off update from %s: previous action still running", uid)
                 if isinstance(event, CallbackQuery):
                     try:

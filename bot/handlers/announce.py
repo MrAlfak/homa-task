@@ -18,6 +18,7 @@ from bot.keyboards import (
     main_menu_keyboard,
 )
 from bot.messages.changelog import build_changelog_announcement
+from config import config
 from services.auth import is_senior_admin
 from services.sheets import Personnel
 from services.sheets_async import SheetsAsync, authorize
@@ -35,6 +36,7 @@ class BroadcastResult:
     sent: int
     failed: int
     failures: tuple[str, ...]
+    sms_sent: int = 0
 
 
 async def _is_senior_admin_user(telegram_id: int) -> bool:
@@ -71,11 +73,28 @@ async def _broadcast_to_all_users(bot: Bot) -> BroadcastResult:
                 exc,
             )
 
+    if config.group_chat_id:
+        try:
+            await bot.send_message(config.group_chat_id, body, parse_mode="HTML")
+            sent += 1
+        except Exception as exc:
+            failures.append(f"گروه ({config.group_chat_id}): {type(exc).__name__}")
+            logger.warning("Announce group send failed: %s", exc)
+
+    sms_sent = 0
+    try:
+        from services.sms import notify_announce
+
+        sms_sent = await notify_announce(recipients)
+    except Exception:
+        logger.warning("Announce SMS failed", exc_info=True)
+
     return BroadcastResult(
-        total=len(recipients),
+        total=len(recipients) + (1 if config.group_chat_id else 0),
         sent=sent,
         failed=len(failures),
         failures=tuple(failures[:10]),
+        sms_sent=sms_sent,
     )
 
 
@@ -87,6 +106,8 @@ def _format_result(result: BroadcastResult) -> str:
         f"📨 ارسال موفق: <code>{result.sent}</code>",
         f"❌ ناموفق: <code>{result.failed}</code>",
     ]
+    if result.sms_sent:
+        lines.append(f"📱 پیامک: <code>{result.sms_sent}</code>")
     if result.failures:
         lines.append("")
         lines.append("<b>نمونه خطاها:</b>")
