@@ -15,6 +15,7 @@ from services.sheets_models import (
     jalali_to_str,
     next_run_on_or_after,
     parse_due_as_jalali,
+    tehran_today,
     template_is_due,
 )
 
@@ -54,7 +55,7 @@ def _match_person(name: str, people: list[Personnel]) -> Personnel | None:
 
 async def run_template_pass(bot: Bot) -> int:
     """Create due template tasks. Returns number of Task rows created."""
-    today = jdatetime.date.today()
+    today = tehran_today()
     today_str = jalali_to_str(today)
     try:
         entries = await SheetsAsync.list_template_entries()

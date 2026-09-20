@@ -47,6 +47,7 @@ func main() {
 
 	cmd := exec.Command(python, filepath.Join(root, "run.py"))
 	cmd.Dir = root
+	cmd.Env = append(os.Environ(), "PYTHONNOUSERSITE=1", "PYTHONUNBUFFERED=1", "PYTHONIOENCODING=utf-8")
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin

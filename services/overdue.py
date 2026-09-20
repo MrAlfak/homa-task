@@ -16,10 +16,9 @@ from bot.formatting import esc
 from config import config
 from services.sheets import Personnel, Task
 from services.sheets_async import SheetsAsync
+from services.sheets_models import TEHRAN_TZ, tehran_now, tehran_today, today_jalali_str
 
 logger = logging.getLogger(__name__)
-
-TEHRAN_TZ = datetime.timezone(datetime.timedelta(hours=3, minutes=30))
 
 # How often to re-scan Sheets / re-color / remind (seconds).
 OVERDUE_INTERVAL_SEC = 3600.0
@@ -95,8 +94,7 @@ async def _personnel_by_name() -> dict[str, Personnel]:
 
 async def run_overdue_pass(bot: Bot) -> None:
     """Color overdue rows in Sheets and DM assignees (once per Jalali day per task)."""
-    today = jdatetime.date.today()
-    today_str = f"{today.year:04d}/{today.month:02d}/{today.day:02d}"
+    today_str = today_jalali_str()
 
     try:
         color_stats, overdue = await SheetsAsync.sync_overdue_row_colors()
@@ -180,12 +178,11 @@ async def run_overdue_pass(bot: Bot) -> None:
 
 async def send_daily_morning_digest(bot: Bot) -> None:
     """Send daily morning briefing (08:00–10:00 Tehran time) with open task summary to active personnel."""
-    now_tehran = datetime.datetime.now(TEHRAN_TZ)
+    now_tehran = tehran_now()
     if not (8 <= now_tehran.hour < 10):
         return
 
-    today = jdatetime.date.today()
-    today_str = f"{today.year:04d}/{today.month:02d}/{today.day:02d}"
+    today_str = today_jalali_str()
 
     notified = _load_notified()
     personnel_list = await SheetsAsync.get_active_personnel()

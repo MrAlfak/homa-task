@@ -27,7 +27,12 @@ from bot.states import TaskEditStates, TaskNoteStates
 from services.auth import can_view_all_tasks, is_admin, is_senior_admin
 from services.sheets import Personnel, Task
 from services.sheets_async import SheetsAsync, authorize
-from services.sheets_models import resolve_shamsi_date_offset, validate_shamsi_date
+from services.sheets_models import (
+    parse_due_as_jalali,
+    resolve_shamsi_date_offset,
+    tehran_today,
+    validate_shamsi_date,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +131,56 @@ async def _show_team_user_picker(message: Message, *, edit: bool = False) -> Non
         await message.answer(text, reply_markup=markup, parse_mode="HTML")
 
 
+def _format_task_overview(title: str, tasks: list[Task]) -> tuple[str, list[Task]]:
+    """Format categorized message (today, overdue, other) and return priority-sorted tasks."""
+    today = tehran_today()
+    overdue_tasks: list[Task] = []
+    today_tasks: list[Task] = []
+    other_tasks: list[Task] = []
+
+    for t in tasks:
+        if t.status in ("done", "cancelled"):
+            continue
+        due = parse_due_as_jalali(t.due_date)
+        if due is not None and due < today:
+            overdue_tasks.append(t)
+        elif due is not None and due == today:
+            today_tasks.append(t)
+        else:
+            other_tasks.append(t)
+
+    sorted_tasks = overdue_tasks + today_tasks + other_tasks
+    if not sorted_tasks:
+        sorted_tasks = tasks
+
+    lines: list[str] = [f"<b>{title}</b> ({len(tasks)} مورد)\n"]
+
+    if today_tasks:
+        lines.append("📅 <b>تسک‌های امروز:</b>")
+        for t in today_tasks:
+            lines.append(f"  ▫️ {esc(t.title)} (📁 {esc(t.project)})")
+        lines.append("")
+
+    if overdue_tasks:
+        lines.append("🔴 <b>تسک‌های معوقه:</b>")
+        for t in overdue_tasks:
+            due_str = f" | ⏱ ددلاین: {esc(t.due_date)}" if t.due_date else ""
+            lines.append(f"  ▫️ {esc(t.title)} (📁 {esc(t.project)}{due_str})")
+        lines.append("")
+
+    if other_tasks:
+        lines.append(f"⏳ <b>سایر تسک‌ها ({len(other_tasks)} مورد):</b>")
+        for t in other_tasks[:6]:
+            due_str = f" | ⏱ ددلاین: {esc(t.due_date)}" if t.due_date else ""
+            lines.append(f"  ▫️ {esc(t.title)} (📁 {esc(t.project)}{due_str})")
+        if len(other_tasks) > 6:
+            lines.append(f"  ... و {len(other_tasks) - 6} تسک دیگر")
+        lines.append("")
+
+    lines.append("👇 برای مشاهده جزئیات یا تغییر وضعیت، تسک را انتخاب کنید:")
+    return "\n".join(lines), sorted_tasks
+
+
 async def send_task_list(
     message: Message,
     telegram_id: int,
@@ -157,9 +212,11 @@ async def send_task_list(
         await message.answer(f"{title}\n\nتسکی یافت نشد.")
         return
 
+    text, sorted_tasks = _format_task_overview(title, tasks)
     await message.answer(
-        f"{title} ({len(tasks)} مورد):\n\nیک تسک را انتخاب کنید:",
-        reply_markup=task_list_keyboard(tasks),
+        text,
+        reply_markup=task_list_keyboard(sorted_tasks),
+        parse_mode="HTML",
     )
 
 
@@ -211,9 +268,10 @@ async def list_user_tasks(callback: CallbackQuery) -> None:
         return
 
     tasks = await SheetsAsync.get_tasks_for_assignee(employee, status=None)
+    text, sorted_tasks = _format_task_overview(f"📌 تسک‌های <b>{esc(employee.name)}</b>", tasks)
     await callback.message.edit_text(
-        f"📌 تسک‌های <b>{esc(employee.name)}</b> ({len(tasks)} مورد):\n\nیک تسک را انتخاب کنید:",
-        reply_markup=user_tasks_keyboard(tasks, member_tid=member_tid),
+        text,
+        reply_markup=user_tasks_keyboard(sorted_tasks, member_tid=member_tid),
         parse_mode="HTML",
     )
 

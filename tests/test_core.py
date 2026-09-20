@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import datetime
 import unittest
+
+import jdatetime
 
 from services.auth import (
     can_access_content,
@@ -18,12 +21,15 @@ from services.auth import (
 )
 from services.sheets_models import (
     STATUS_SHEET_VALUES,
+    TEHRAN_TZ,
     ContentEntry,
+    ContentSummaryItem,
     FilmingEntry,
     Personnel,
     Task,
     coalesce_personnel,
     encode_task_id,
+    get_jalali_period_dates,
     normalize_mobile,
     normalize_sheet_title,
     normalize_status,
@@ -34,6 +40,9 @@ from services.sheets_models import (
     record_telegram_id,
     sms_settings_from_records,
     status_to_sheet,
+    tehran_now,
+    tehran_today,
+    today_jalali_str,
     validate_shamsi_date,
 )
 
@@ -110,6 +119,129 @@ class AuthTests(unittest.TestCase):
 
 
 class ModelTests(unittest.TestCase):
+    def test_tehran_timezone_pinning(self) -> None:
+        now = tehran_now()
+        self.assertIsNotNone(now.tzinfo)
+        self.assertEqual(now.tzinfo.utcoffset(None), datetime.timedelta(hours=3, minutes=30))
+        today_str = today_jalali_str()
+        self.assertEqual(len(today_str), 10)
+        self.assertTrue(today_str.startswith("14"))
+
+    def test_jalali_period_calculation(self) -> None:
+        d1 = jdatetime.date(1405, 6, 20)
+        from_d, to_d, label = get_jalali_period_dates("1_to_1", d1)
+        self.assertEqual(from_d, "1405/06/01")
+        self.assertEqual(to_d, "1405/06/20")
+        self.assertIn("دوره یکم", label)
+
+        from_d, to_d, label = get_jalali_period_dates("15_to_15", d1)
+        self.assertEqual(from_d, "1405/06/15")
+        self.assertEqual(to_d, "1405/06/20")
+        self.assertIn("۱۵", label)
+
+        d2 = jdatetime.date(1405, 6, 5)
+        from_d2, to_d2, label2 = get_jalali_period_dates("15_to_15", d2)
+        self.assertEqual(from_d2, "1405/05/15")
+        self.assertEqual(to_d2, "1405/06/05")
+
+        d3 = jdatetime.date(1405, 1, 10)
+        from_d3, to_d3, label3 = get_jalali_period_dates("15_to_15", d3)
+        self.assertEqual(from_d3, "1404/12/15")
+        self.assertEqual(to_d3, "1405/01/10")
+
+    def test_content_entry_date_and_counts(self) -> None:
+        entry = ContentEntry(
+            row_index=5,
+            name="بخشی",
+            project="عمومی",
+            post="✓",
+            story="",
+            status="pending",
+            created_by="مدیر",
+        )
+        self.assertEqual(entry.effective_post_count, 1)
+        self.assertEqual(entry.effective_story_count, 0)
+        self.assertEqual(entry.content_type, "پست")
+
+        entry2 = ContentEntry(
+            row_index=6,
+            name="علیپور",
+            project="پیج اصلی",
+            post="✓",
+            story="✓",
+            status="pending",
+            created_by="مدیر",
+            date="1405/06/28",
+            post_count=2,
+            story_count=5,
+        )
+        self.assertEqual(entry2.effective_post_count, 2)
+        self.assertEqual(entry2.effective_story_count, 5)
+        self.assertEqual(entry2.date, "1405/06/28")
+        self.assertEqual(entry2.content_type, "پست و استوری")
+
+    def test_format_task_overview_categorization(self) -> None:
+        from bot.handlers.employee_tasks import _format_task_overview
+
+        today = tehran_today()
+        today_str = f"{today.year:04d}/{today.month:02d}/{today.day:02d}"
+        yesterday = today - jdatetime.timedelta(days=1)
+        yesterday_str = f"{yesterday.year:04d}/{yesterday.month:02d}/{yesterday.day:02d}"
+        tomorrow = today + jdatetime.timedelta(days=1)
+        tomorrow_str = f"{tomorrow.year:04d}/{tomorrow.month:02d}/{tomorrow.day:02d}"
+
+        t_overdue = Task(
+            sheet_name="علی",
+            row_index=2,
+            title="تسک دیروز",
+            project="هما",
+            assignee_name="علی",
+            created_by="مدیر",
+            created_at=yesterday_str,
+            due_date=yesterday_str,
+            priority="High",
+            status="pending",
+            description="",
+        )
+        t_today = Task(
+            sheet_name="علی",
+            row_index=3,
+            title="تسک امروز",
+            project="عمومی",
+            assignee_name="علی",
+            created_by="مدیر",
+            created_at=today_str,
+            due_date=today_str,
+            priority="High",
+            status="pending",
+            description="",
+        )
+        t_future = Task(
+            sheet_name="علی",
+            row_index=4,
+            title="تسک فردا",
+            project="عمومی",
+            assignee_name="علی",
+            created_by="مدیر",
+            created_at=today_str,
+            due_date=tomorrow_str,
+            priority="Normal",
+            status="pending",
+            description="",
+        )
+
+        text, sorted_tasks = _format_task_overview("📌 تسک‌های من", [t_future, t_overdue, t_today])
+
+        # Verify categorization text contains sections
+        self.assertIn("تسک‌های امروز", text)
+        self.assertIn("تسک‌های معوقه", text)
+        self.assertIn("تسک فردا", text)
+
+        # Verify sorted_tasks priority: overdue first, then today, then future
+        self.assertEqual(sorted_tasks[0].title, "تسک دیروز")
+        self.assertEqual(sorted_tasks[1].title, "تسک امروز")
+        self.assertEqual(sorted_tasks[2].title, "تسک فردا")
+
     def test_task_id_is_ascii_and_short(self) -> None:
         task = Task(
             sheet_name="سید علی‌رضا محمدی",

@@ -3,8 +3,28 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import datetime
 
 import jdatetime
+
+TEHRAN_TZ = datetime.timezone(datetime.timedelta(hours=3, minutes=30))
+
+
+def tehran_now() -> jdatetime.datetime:
+    """Current Jalali datetime strictly pinned to Iran (+03:30) timezone."""
+    return jdatetime.datetime.now(TEHRAN_TZ)
+
+
+def tehran_today() -> jdatetime.date:
+    """Current Jalali date strictly pinned to Iran (+03:30) timezone."""
+    return tehran_now().date()
+
+
+def today_jalali_str() -> str:
+    """Current Jalali date formatted as YYYY/MM/DD."""
+    today = tehran_today()
+    return f"{today.year:04d}/{today.month:02d}/{today.day:02d}"
+
 
 PERSONNEL_CACHE_TTL_SEC = 45.0
 PROJECTS_CACHE_TTL_SEC = 45.0
@@ -197,14 +217,27 @@ CONTENT_DESIGN_NAMES: tuple[str, ...] = ("علیپور", "مرادی", "بخشی
 CONTENT_TEAM_COLUMNS = CONTENT_DESIGN_NAMES
 CONTENT_TYPE_OPTIONS: tuple[str, ...] = ("پست", "استوری", "پست و استوری")
 CONTENT_HEADERS = [
+    "تاریخ",
     "نام",
     "پروژه",
     "پست",
     "استوری",
+    "تعداد پست",
+    "تعداد استوری",
     "وضعیت",
     "ایجاد کننده",
 ]
 CONTENT_PROJECT_HEADER_ALIASES = frozenset({"پروژه", "نام پروژه", "project", "Project"})
+
+CONTENT_REPORT_SHEET_NAME = "Content_Report"
+CONTENT_REPORT_SHEET_ALIASES: tuple[str, ...] = (
+    "Content_Report",
+    "Content Report",
+    "گزارش محتوا",
+    "تجمیع محتوا",
+    "Content Summary",
+)
+
 
 GENERAL_PROJECT_CATEGORIES: tuple[str, ...] = (
     "عمومی",
@@ -265,7 +298,7 @@ STATUS_CANCELLED = {
     "تسک لغو شده",
 }
 
-TASKS_PAGE_SIZE = 8
+TASKS_PAGE_SIZE = 20
 PROJECTS_PAGE_SIZE = 20
 
 SMS_SHEET_NAME = "SMS"
@@ -319,6 +352,7 @@ SYSTEM_TAB_ORDER: tuple[str, ...] = (
     "SMS_Log",
     "Meetings",
     "Design",
+    "Content_Report",
     "Ideas",
     "Ref",
     "Editing",
@@ -555,7 +589,7 @@ class FilmingEntry:
 
 @dataclass(frozen=True)
 class ContentEntry:
-    """Row from the Design tab (نام | پروژه | پست | استوری | …)."""
+    """Row from the Design tab (تاریخ | نام | پروژه | پست | استوری | تعداد پست | تعداد استوری | وضعیت | ایجاد کننده)."""
 
     row_index: int
     name: str
@@ -564,6 +598,9 @@ class ContentEntry:
     story: str
     status: str
     created_by: str
+    date: str = ""
+    post_count: int = 0
+    story_count: int = 0
 
     @property
     def id(self) -> str:
@@ -578,9 +615,21 @@ class ContentEntry:
         return self.name
 
     @property
+    def effective_post_count(self) -> int:
+        if self.post_count > 0:
+            return self.post_count
+        return 1 if self.post.strip() else 0
+
+    @property
+    def effective_story_count(self) -> int:
+        if self.story_count > 0:
+            return self.story_count
+        return 1 if self.story.strip() else 0
+
+    @property
     def content_type(self) -> str:
-        has_post = bool(self.post.strip())
-        has_story = bool(self.story.strip())
+        has_post = bool(self.post.strip()) or self.post_count > 0
+        has_story = bool(self.story.strip()) or self.story_count > 0
         if has_post and has_story:
             return "پست و استوری"
         if has_post:
@@ -588,6 +637,54 @@ class ContentEntry:
         if has_story:
             return "استوری"
         return ""
+
+
+@dataclass(frozen=True)
+class ContentSummaryItem:
+    """Aggregated stats for an admin and project within a date range."""
+
+    name: str
+    project: str
+    post_count: int
+    story_count: int
+    total_count: int
+
+
+def get_jalali_period_dates(
+    period_type: str,
+    ref_date: jdatetime.date | None = None,
+) -> tuple[str, str, str]:
+    """Calculate (from_date, to_date, period_label) for Jalali periods.
+
+    period_type: '1_to_1' (1st of month to ref_date) or '15_to_15' (15th to ref_date).
+    """
+    if ref_date is None:
+        ref_date = tehran_today()
+
+    y, m, d = ref_date.year, ref_date.month, ref_date.day
+
+    if period_type == "15_to_15":
+        if d >= 15:
+            from_d = jdatetime.date(y, m, 15)
+        else:
+            if m > 1:
+                from_d = jdatetime.date(y, m - 1, 15)
+            else:
+                from_d = jdatetime.date(y - 1, 12, 15)
+        to_d = ref_date
+        month_label = PERSIAN_MONTHS[from_d.month - 1]
+        title = f"دوره ۱۵ {month_label} تا {to_d.day:02d} {PERSIAN_MONTHS[to_d.month - 1]}"
+    else:
+        # Default '1_to_1'
+        from_d = jdatetime.date(y, m, 1)
+        to_d = ref_date
+        month_label = PERSIAN_MONTHS[from_d.month - 1]
+        title = f"دوره یکم تا {to_d.day:02d} {month_label}"
+
+    from_str = f"{from_d.year:04d}/{from_d.month:02d}/{from_d.day:02d}"
+    to_str = f"{to_d.year:04d}/{to_d.month:02d}/{to_d.day:02d}"
+    return from_str, to_str, title
+
 
 
 def encode_task_id(sheet_gid: int, row_index: int, sheet_name: str = "") -> str:
@@ -819,14 +916,14 @@ def is_general_project(name: str) -> bool:
 
 
 def shamsi_today() -> tuple[str, str]:
-    now = jdatetime.datetime.now()
+    now = tehran_now()
     date_str = f"{now.year:04d}/{now.month:02d}/{now.day:02d}"
     month_str = PERSIAN_MONTHS[now.month - 1] + " "
     return date_str, month_str
 
 
 def shamsi_date_range(*, before: int = 0, after: int = 6) -> list[tuple[int, str]]:
-    today = jdatetime.date.today()
+    today = tehran_today()
     result: list[tuple[int, str]] = []
     for offset in range(-before, after + 1):
         day = today + jdatetime.timedelta(days=offset)
@@ -850,7 +947,7 @@ def shamsi_date_button_label(day_offset: int, date_str: str) -> str:
         return f"فردا  {short}"
     if day_offset == -1:
         return f"دیروز  {short}"
-    today = jdatetime.date.today()
+    today = tehran_today()
     day = today + jdatetime.timedelta(days=day_offset)
     try:
         day_fa = jdatetime.date(day.year, day.month, day.day, locale=jdatetime.FA_LOCALE)

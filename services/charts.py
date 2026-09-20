@@ -21,6 +21,7 @@ from services.sheets_models import (
     Task,
     parse_due_as_jalali,
     shamsi_today,
+    tehran_today,
     validate_shamsi_date,
 )
 
@@ -81,7 +82,7 @@ def render_report(kind: str, tasks: list[Task], *, kinds: tuple[str, ...] | None
     """Return a PNG for one report kind. ``summary`` tiles the given kinds."""
     font = _font()
     plt.rcParams["axes.unicode_minus"] = False
-    today = jdatetime.date.today()
+    today = tehran_today()
     today_str, _month = shamsi_today()
     if kind == "summary":
         panels = [item for item in (kinds or ("status", "people", "project", "deadline")) if item != "summary"]

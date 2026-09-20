@@ -11,15 +11,16 @@ from aiogram.types import BufferedInputFile
 from services.auth import enabled_report_kinds
 from services.overdue import _load_notified, _save_notified
 from services.sheets_async import SheetsAsync
+from services.sheets_models import tehran_today, today_jalali_str
 
 logger = logging.getLogger(__name__)
 
 
 async def run_weekly_report_pass(bot: Bot) -> None:
-    today = jdatetime.date.today()
+    today = tehran_today()
     if today.weekday() != 6:
         return
-    today_str = f"{today.year:04d}/{today.month:02d}/{today.day:02d}"
+    today_str = today_jalali_str()
     notified = _load_notified()
     if notified.get("__weekly_report__") == today_str:
         return

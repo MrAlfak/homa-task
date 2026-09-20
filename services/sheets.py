@@ -16,6 +16,8 @@ from services.sheets_models import (
     CONTENT_DESIGN_NAMES,
     CONTENT_HEADERS,
     CONTENT_PROJECT_HEADER_ALIASES,
+    CONTENT_REPORT_SHEET_ALIASES,
+    CONTENT_REPORT_SHEET_NAME,
     CONTENT_SHEET_ALIASES,
     CONTENT_SHEET_NAME,
     EDITING_SHEET_ALIASES,
@@ -56,6 +58,7 @@ from services.sheets_models import (
     TEMPLATE_TEST_TITLE,
     WORKSHEET_CACHE_TTL_SEC,
     ContentEntry,
+    ContentSummaryItem,
     FilmingEntry,
     Idea,
     Personnel,
@@ -64,6 +67,7 @@ from services.sheets_models import (
     TemplateEntry,
     coalesce_personnel,
     date_for_sheet,
+    get_jalali_period_dates,
     is_blank_task_cell,
     is_general_project,
     is_personnel_bool_header,
@@ -89,7 +93,10 @@ from services.sheets_models import (
     sort_projects,
     status_to_sheet,
     task_match_key,
+    tehran_now,
+    tehran_today,
     template_from_record,
+    today_jalali_str,
     validate_shamsi_date,
 )
 
@@ -165,6 +172,7 @@ class SheetsService:
         self.ensure_dropdown_right_align()
         self.ensure_filming_schema()
         self.ensure_content_schema()
+        self.ensure_content_report_schema()
         self.ensure_sms_schema()
         self.ensure_template_schema()
 
@@ -200,6 +208,7 @@ class SheetsService:
             (TEMPLATE_SHEET_NAME, TEMPLATE_SHEET_ALIASES),
             (FILMING_SHEET_NAME, FILMING_SHEET_ALIASES),
             (CONTENT_SHEET_NAME, CONTENT_SHEET_ALIASES),
+            (CONTENT_REPORT_SHEET_NAME, CONTENT_REPORT_SHEET_ALIASES),
             (EDITING_SHEET_NAME, EDITING_SHEET_ALIASES),
             (IDEAS_SHEET_NAME, ("Ideas", "ایده", "ایده ها")),
             (SMS_SHEET_NAME, ("SMS", "پیامک")),
@@ -1098,7 +1107,7 @@ class SheetsService:
             worksheet = self._all_worksheets().get(SMS_LOG_SHEET_NAME)
         if worksheet is None:
             return
-        stamp = jdatetime.datetime.now().strftime("%Y/%m/%d %H:%M")
+        stamp = tehran_now().strftime("%Y/%m/%d %H:%M")
         kind_label = {
             "new_task": "تسک جدید",
             "overdue": "عقب‌افتاده",
@@ -1361,6 +1370,60 @@ class SheetsService:
             log_label="Design",
         )
 
+    def _content_report_worksheet(self) -> gspread.Worksheet:
+        return self.ensure_content_report_schema()
+
+    def get_content_report_sheet_url(self) -> str:
+        worksheet = self._content_report_worksheet()
+        return f"{config.google_sheet_url}?gid={worksheet.id}"
+
+    def ensure_content_report_schema(self) -> gspread.Worksheet:
+        """Ensure Content_Report (گزارش محتوا) tab exists with interactive filters and summary formulas."""
+        worksheet = self._get_or_rename_worksheet(
+            CONTENT_REPORT_SHEET_NAME,
+            CONTENT_REPORT_SHEET_ALIASES,
+        )
+        if worksheet is None:
+            worksheet = self._spreadsheet.add_worksheet(
+                title=CONTENT_REPORT_SHEET_NAME,
+                rows=500,
+                cols=10,
+            )
+            logger.info("Created worksheet %s", CONTENT_REPORT_SHEET_NAME)
+            self.invalidate_worksheet_cache()
+
+        vals = worksheet.row_values(1)
+        if not vals:
+            try:
+                self._spreadsheet.batch_update({
+                    "requests": [{
+                        "updateSheetProperties": {
+                            "properties": {
+                                "sheetId": worksheet.id,
+                                "rightToLeft": True,
+                            },
+                            "fields": "rightToLeft",
+                        }
+                    }]
+                })
+            except Exception:
+                pass
+
+            today_str = today_jalali_str()
+            m_start = today_str[:8] + "01"
+
+            setup_rows = [
+                ["📊 گزارش تجمیعی تولید محتوا (پست و استوری)"],
+                [""],
+                ["نوع دوره:", "یکم به یکم", "از تاریخ:", m_start, "تا تاریخ (مبنای تجمیع):", today_str],
+                [""],
+                ["ردیف", "نام ادمین / طراح", "پروژه", "تعداد پست", "تعداد استوری", "مجموع محتوا", "وضعیت"],
+            ]
+            worksheet.update("A1:G5", setup_rows, value_input_option="USER_ENTERED")
+
+        return worksheet
+
+
     def _ensure_project_column_dropdown(
         self,
         worksheet: gspread.Worksheet,
@@ -1468,15 +1531,30 @@ class SheetsService:
         project = self._content_project_from_record(record)
         post = str(record.get("پست", "")).strip()
         story = str(record.get("استوری", "")).strip()
+        date = str(record.get("تاریخ", "")).strip()
+        raw_post_count = str(record.get("تعداد پست", "")).strip()
+        raw_story_count = str(record.get("تعداد استوری", "")).strip()
+        try:
+            post_count = int(raw_post_count) if raw_post_count.isdigit() else (1 if post else 0)
+        except Exception:
+            post_count = 1 if post else 0
+        try:
+            story_count = int(raw_story_count) if raw_story_count.isdigit() else (1 if story else 0)
+        except Exception:
+            story_count = 1 if story else 0
+
         # Legacy combined column fallback.
         legacy_type = str(record.get("پست / استوری", "")).strip()
         if legacy_type and not post and not story:
             if "استوری" in legacy_type and "پست" in legacy_type:
                 post, story = "✓", "✓"
+                post_count, story_count = 1, 1
             elif "استوری" in legacy_type:
                 story = "✓"
+                story_count = 1
             else:
                 post = legacy_type or "✓"
+                post_count = 1
         # Legacy person-as-column layout.
         if not name:
             for column in CONTENT_DESIGN_NAMES:
@@ -1494,6 +1572,9 @@ class SheetsService:
             story=story,
             status=self._normalize_status(str(record.get("وضعیت", "")).strip()),
             created_by=str(record.get("ایجاد کننده", "")).strip(),
+            date=date,
+            post_count=post_count,
+            story_count=story_count,
         )
 
     def create_content_entry(
@@ -1504,6 +1585,9 @@ class SheetsService:
         include_post: bool,
         include_story: bool,
         created_by_name: str,
+        date: str | None = None,
+        post_count: int | None = None,
+        story_count: int | None = None,
     ) -> ContentEntry:
         person = name.strip()
         if not person:
@@ -1511,14 +1595,21 @@ class SheetsService:
         if not include_post and not include_story:
             raise ValueError("At least one of post/story must be selected")
 
+        entry_date = (date or today_jalali_str()).strip()
+        p_count = post_count if post_count is not None else (1 if include_post else 0)
+        s_count = story_count if story_count is not None else (1 if include_story else 0)
+
         worksheet = self._content_worksheet()
         headers = worksheet.row_values(1) or CONTENT_HEADERS
         # Write by header order so extra leftover columns are left untouched.
         values_by_header = {
+            "تاریخ": entry_date,
             "نام": person,
             "پروژه": project.strip(),
             "پست": "✓" if include_post else "",
             "استوری": "✓" if include_story else "",
+            "تعداد پست": str(p_count) if p_count > 0 else "",
+            "تعداد استوری": str(s_count) if s_count > 0 else "",
             "وضعیت": "در انتظار",
             "ایجاد کننده": created_by_name,
         }
@@ -1526,10 +1617,13 @@ class SheetsService:
         # If expected headers are missing from a messy sheet, append canonical row.
         if "نام" not in {h.strip() for h in headers}:
             row = [
+                entry_date,
                 person,
                 project.strip(),
                 "✓" if include_post else "",
                 "✓" if include_story else "",
+                str(p_count) if p_count > 0 else "",
+                str(s_count) if s_count > 0 else "",
                 "در انتظار",
                 created_by_name,
             ]
@@ -1542,6 +1636,9 @@ class SheetsService:
             story="✓" if include_story else "",
             status="pending",
             created_by=created_by_name,
+            date=entry_date,
+            post_count=p_count,
+            story_count=s_count,
         )
 
     def list_content_entries(self, status: str | None = None) -> list[ContentEntry]:
@@ -1558,10 +1655,48 @@ class SheetsService:
             if status is None:
                 if entry.status in {"done", "cancelled"}:
                     continue
-            elif entry.status != status:
+            elif status != "all" and entry.status != status:
                 continue
             entries.append(entry)
         return entries
+
+    def get_content_summary(
+        self,
+        *,
+        from_date: str | None = None,
+        to_date: str | None = None,
+        period_type: str = "1_to_1",
+    ) -> tuple[list[ContentSummaryItem], str, str, str]:
+        """Aggregate post and story counts between from_date and to_date (inclusive)."""
+        from collections import defaultdict
+
+        calc_from, calc_to, period_label = get_jalali_period_dates(period_type)
+        f_date = from_date or calc_from
+        t_date = to_date or calc_to
+
+        entries = self.list_content_entries(status="all")
+        grouped: dict[tuple[str, str], list[int]] = defaultdict(lambda: [0, 0])
+        for entry in entries:
+            entry_d = entry.date.strip()
+            if entry_d:
+                if not (f_date <= entry_d <= t_date):
+                    continue
+            grouped[(entry.name, entry.project)][0] += entry.effective_post_count
+            grouped[(entry.name, entry.project)][1] += entry.effective_story_count
+
+        summary_items: list[ContentSummaryItem] = []
+        for (name, project), (posts, stories) in sorted(grouped.items(), key=lambda x: (x[0][0], x[0][1])):
+            summary_items.append(
+                ContentSummaryItem(
+                    name=name,
+                    project=project,
+                    post_count=posts,
+                    story_count=stories,
+                    total_count=posts + stories,
+                )
+            )
+        return summary_items, f_date, t_date, period_label
+
 
     def get_content_entry_by_id(self, entry_id: str) -> ContentEntry | None:
         try:
@@ -2300,7 +2435,7 @@ class SheetsService:
 
     def list_overdue_open_tasks(self) -> list[Task]:
         """Open (not done) tasks whose Jalali due date is before today."""
-        today = jdatetime.date.today()
+        today = tehran_today()
         overdue: list[Task] = []
         for person in self.get_active_personnel():
             if person.role == "admin":

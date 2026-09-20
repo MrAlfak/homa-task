@@ -246,14 +246,28 @@ def filming_menu_keyboard(sheet_url: str) -> InlineKeyboardMarkup:
     )
 
 
-def content_menu_keyboard(sheet_url: str) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text=CREATE_CONTENT_BUTTON, callback_data="content:new")],
-            [InlineKeyboardButton(text=LIST_CONTENT_BUTTON, callback_data="content:list")],
-            [InlineKeyboardButton(text=OPEN_CONTENT_SHEET_BUTTON, url=sheet_url)],
-        ]
-    )
+def content_menu_keyboard(sheet_url: str, report_url: str = "") -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton(text=CREATE_CONTENT_BUTTON, callback_data="content:new")],
+        [InlineKeyboardButton(text=LIST_CONTENT_BUTTON, callback_data="content:list")],
+        [InlineKeyboardButton(text="📊 گزارش تجمیعی محتوا", callback_data="content:report")],
+        [InlineKeyboardButton(text=OPEN_CONTENT_SHEET_BUTTON, url=sheet_url)],
+    ]
+    if report_url:
+        buttons.append([InlineKeyboardButton(text="📈 شیت گزارش محتوا", url=report_url)])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def content_report_keyboard(report_url: str = "") -> InlineKeyboardMarkup:
+    buttons = [
+        [InlineKeyboardButton(text="📅 دوره یکم تا امروز", callback_data="content:rep:1_to_1")],
+        [InlineKeyboardButton(text="📅 دوره ۱۵ تا امروز", callback_data="content:rep:15_to_15")],
+    ]
+    if report_url:
+        buttons.append([InlineKeyboardButton(text="📈 باز کردن شیت گزارش محتوا", url=report_url)])
+    buttons.append([InlineKeyboardButton(text="🔙 منوی تولید محتوا", callback_data="content:menu")])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
+
 
 
 def filming_weekday_keyboard() -> InlineKeyboardMarkup:

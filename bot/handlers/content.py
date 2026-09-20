@@ -18,6 +18,7 @@ from bot.keyboards import (
     content_menu_keyboard,
     content_person_keyboard,
     content_projects_inline_keyboard,
+    content_report_keyboard,
     content_type_keyboard,
     main_menu_keyboard,
 )
@@ -63,13 +64,15 @@ async def _require_content(message_or_user_id) -> Personnel | None:
 
 
 def _format_entry(entry: ContentEntry) -> str:
-    post_line = "✓" if entry.post.strip() else "—"
-    story_line = "✓" if entry.story.strip() else "—"
+    post_count_str = f"{entry.effective_post_count} عدد" if entry.effective_post_count else "—"
+    story_count_str = f"{entry.effective_story_count} عدد" if entry.effective_story_count else "—"
+    date_line = f"📅 تاریخ: {esc(entry.date)}\n" if entry.date else ""
     return (
+        f"{date_line}"
         f"✍️ <b>{esc(entry.name or '—')}</b>\n"
         f"📁 پروژه: {esc(entry.project or '—')}\n"
-        f"📰 پست: {esc(post_line)}\n"
-        f"📱 استوری: {esc(story_line)}\n"
+        f"📰 پست: {esc(post_count_str)}\n"
+        f"📱 استوری: {esc(story_count_str)}\n"
         f"📊 {esc(STATUS_LABELS.get(entry.status, entry.status))}\n"
         f"✍️ ثبت‌کننده: {esc(entry.created_by)}"
     )
@@ -77,11 +80,15 @@ def _format_entry(entry: ContentEntry) -> str:
 
 async def _show_content_menu(message: Message, *, edit: bool = False) -> None:
     sheet_url = await SheetsAsync.get_content_sheet_url()
+    try:
+        report_url = await SheetsAsync.get_content_report_sheet_url()
+    except Exception:
+        report_url = ""
     text = (
         "✍️ <b>بخش تولید محتوا (Design)</b>\n\n"
-        "ثبت روی تب Design با ستون‌های نام / پروژه / پست / استوری."
+        "ثبت روزانه پست و استوری ادمین‌ها و مشاهده گزارش‌های تجمیعی دوره‌ای."
     )
-    markup = content_menu_keyboard(sheet_url)
+    markup = content_menu_keyboard(sheet_url, report_url=report_url)
     if edit:
         await safe_edit_text(message, text, parse_mode="HTML", reply_markup=markup)
     else:
@@ -106,6 +113,79 @@ async def content_menu_callback(callback: CallbackQuery, state: FSMContext) -> N
         await callback.message.answer(NO_ACCESS)
         return
     await _show_content_menu(callback.message, edit=True)
+
+
+@router.callback_query(F.data == "content:report")
+async def content_report_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    if callback.message is None or callback.from_user is None:
+        return
+    await callback.answer()
+    if await _require_content(callback.from_user.id) is None:
+        await callback.message.answer(NO_ACCESS)
+        return
+    try:
+        report_url = await SheetsAsync.get_content_report_sheet_url()
+    except Exception:
+        report_url = ""
+    text = (
+        "📊 <b>گزارش تجمیعی تولید محتوا</b>\n\n"
+        "دوره مدنظر را انتخاب کنید تا آمار تجمیعی پست‌ها و استوری‌ها تا امروز محاسبه شود:"
+    )
+    await safe_edit_text(
+        callback.message,
+        text,
+        parse_mode="HTML",
+        reply_markup=content_report_keyboard(report_url),
+    )
+
+
+@router.callback_query(F.data.startswith("content:rep:"))
+async def content_report_view(callback: CallbackQuery, state: FSMContext) -> None:
+    if callback.message is None or callback.from_user is None:
+        return
+    await callback.answer("در حال محاسبه تجمیع محتوا…")
+    if await _require_content(callback.from_user.id) is None:
+        await callback.message.answer(NO_ACCESS)
+        return
+
+    period_type = callback.data.removeprefix("content:rep:")
+    try:
+        report_url = await SheetsAsync.get_content_report_sheet_url()
+    except Exception:
+        report_url = ""
+
+    items, from_d, to_d, label = await SheetsAsync.get_content_summary(period_type=period_type)
+
+    if not items:
+        msg_text = (
+            f"📊 <b>گزارش تجمیعی محتوا</b>\n"
+            f"📅 <b>{esc(label)}</b> ({esc(from_d)} تا {esc(to_d)})\n\n"
+            f"هیچ داده‌ای در این بازه ثبت نشده است."
+        )
+    else:
+        total_posts = sum(i.post_count for i in items)
+        total_stories = sum(i.story_count for i in items)
+        lines = [
+            f"📊 <b>گزارش تجمیعی محتوا</b>\n"
+            f"📅 <b>{esc(label)}</b>\n"
+            f"⏱ <i>بازه: {esc(from_d)} تا {esc(to_d)}</i>\n",
+            f"📈 <b>مجموع کل:</b> {total_posts} پست  |  {total_stories} استوری\n",
+            "──────────────────",
+        ]
+        for item in items:
+            lines.append(
+                f"👤 <b>{esc(item.name)}</b> ({esc(item.project)})\n"
+                f"   📰 پست: <b>{item.post_count}</b>  |  📱 استوری: <b>{item.story_count}</b>  (جمع: {item.total_count})"
+            )
+        msg_text = "\n".join(lines)
+
+    await safe_edit_text(
+        callback.message,
+        msg_text,
+        parse_mode="HTML",
+        reply_markup=content_report_keyboard(report_url),
+    )
+
 
 
 @router.callback_query(F.data == "content:cancel")

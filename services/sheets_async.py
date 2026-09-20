@@ -11,7 +11,7 @@ import requests
 from gspread.exceptions import APIError
 
 from services.auth import AuthResult, authorize_user
-from services.sheets import ContentEntry, FilmingEntry, Idea, Personnel, Task, get_sheets_service
+from services.sheets import ContentEntry, ContentSummaryItem, FilmingEntry, Idea, Personnel, Task, get_sheets_service
 from services.sheets_models import resolve_shamsi_date_offset, validate_shamsi_date
 
 logger = logging.getLogger(__name__)
@@ -273,6 +273,9 @@ class SheetsAsync:
         include_post: bool,
         include_story: bool,
         created_by_name: str,
+        date: str | None = None,
+        post_count: int | None = None,
+        story_count: int | None = None,
     ) -> ContentEntry:
         return await run_once(
             cls._svc().create_content_entry,
@@ -281,6 +284,9 @@ class SheetsAsync:
             include_post=include_post,
             include_story=include_story,
             created_by_name=created_by_name,
+            date=date,
+            post_count=post_count,
+            story_count=story_count,
         )
 
     @classmethod
@@ -304,6 +310,25 @@ class SheetsAsync:
     @classmethod
     async def get_content_sheet_url(cls) -> str:
         return await run_blocking(cls._svc().get_content_sheet_url)
+
+    @classmethod
+    async def get_content_report_sheet_url(cls) -> str:
+        return await run_blocking(cls._svc().get_content_report_sheet_url)
+
+    @classmethod
+    async def get_content_summary(
+        cls,
+        *,
+        from_date: str | None = None,
+        to_date: str | None = None,
+        period_type: str = "1_to_1",
+    ) -> tuple[list[ContentSummaryItem], str, str, str]:
+        return await run_blocking(
+            cls._svc().get_content_summary,
+            from_date=from_date,
+            to_date=to_date,
+            period_type=period_type,
+        )
 
     @classmethod
     async def find_personnel_by_name_hint(cls, name_hint: str) -> Personnel | None:

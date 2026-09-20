@@ -16,6 +16,10 @@ if not exist ".env" (
     exit /b 1
 )
 
+set PYTHONNOUSERSITE=1
+set PYTHONUNBUFFERED=1
+set PYTHONIOENCODING=utf-8
+
 if exist "python\python.exe" (
     echo Starting bot using bundled Python runtime...
     python\python.exe run.py
