@@ -23,7 +23,7 @@ T = TypeVar("T")
 # transient server-side hiccups (5xx). Anything else (permission, not-found,
 # bad request) is a real error and should fail fast.
 _TRANSIENT_API_CODES = {429, 500, 502, 503, 504}
-_RETRY_ATTEMPTS = 3
+_RETRY_ATTEMPTS = 4
 _RETRY_BASE_DELAY = 0.6
 _sheets_lock = asyncio.Lock()
 
@@ -33,6 +33,17 @@ def _is_transient_api_error(exc: APIError) -> bool:
         return exc.response.status_code in _TRANSIENT_API_CODES
     except Exception:
         return False
+
+
+def _retry_delay(exc: Exception | None, attempt: int) -> float:
+    if isinstance(exc, APIError):
+        try:
+            if exc.response.status_code == 429:
+                # 429 Quota is per-minute; wait longer to let the quota window reset
+                return 3.5 * (attempt + 1)
+        except Exception:
+            pass
+    return _RETRY_BASE_DELAY * (attempt + 1)
 
 
 async def run_blocking(func: Callable[..., T], /, *args, **kwargs) -> T:
@@ -57,7 +68,7 @@ async def run_blocking(func: Callable[..., T], /, *args, **kwargs) -> T:
                 last_exc = exc
                 if attempt == _RETRY_ATTEMPTS - 1:
                     raise
-        delay = _RETRY_BASE_DELAY * (attempt + 1)
+        delay = _retry_delay(last_exc, attempt)
         logger.warning(
             "Sheets call %s failed (attempt %d/%d): %s — retrying in %.1fs",
             getattr(func, "__name__", func),

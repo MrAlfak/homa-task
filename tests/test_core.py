@@ -783,9 +783,14 @@ class KeyboardsAndUXFeaturesTests(unittest.TestCase):
         kb = task_list_keyboard(tasks, active_filter="all")
         callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
         self.assertIn("taskfilter:all", callbacks)
-        self.assertIn("taskfilter:high", callbacks)
+        self.assertIn("taskfilter:overdue", callbacks)
         self.assertIn("taskfilter:today", callbacks)
-        self.assertTrue(any(cb and cb.startswith("task:quickdone:") for cb in callbacks))
+        # Verify task rows (after filter row) are single-column (one button per row)
+        task_rows = kb.inline_keyboard[1:]
+        self.assertEqual(len(task_rows), 3)
+        for row in task_rows:
+            self.assertEqual(len(row), 1)
+            self.assertTrue(row[0].callback_data.startswith("task:view:"))
 
     def test_task_detail_keyboard_manager_and_notes(self) -> None:
         from bot.keyboards import task_detail_keyboard
@@ -841,6 +846,50 @@ class KeyboardsAndUXFeaturesTests(unittest.TestCase):
         text = format_task_detail(task)
         self.assertIn("طراحی پوستر", text)
         self.assertIn("📝 توضیحات: لینک فایل در درایو قرار دارد", text)
+
+    def test_is_my_tasks_text_matches_badges_and_variations(self) -> None:
+        from bot.keyboards import is_my_tasks_text, is_done_tasks_text, is_team_tasks_text
+
+        # Badges with count
+        self.assertTrue(is_my_tasks_text("📌 تسک‌های من (3)"))
+        self.assertTrue(is_my_tasks_text("📌 تسک‌های من (1)"))
+        self.assertTrue(is_my_tasks_text("📌 تسک های من (12)"))
+        self.assertTrue(is_my_tasks_text("📋 تسک‌های من (5)"))
+
+        # Standard forms without count
+        self.assertTrue(is_my_tasks_text("📌 تسک‌های من"))
+        self.assertTrue(is_my_tasks_text("📋 تسک‌های من"))
+        self.assertTrue(is_my_tasks_text("تسک‌های من"))
+        self.assertTrue(is_my_tasks_text("تسک های من"))
+        self.assertTrue(is_my_tasks_text("تسك هاي من"))  # Arabic kaf and yeh
+
+        # Negative checks
+        self.assertFalse(is_my_tasks_text("➕ ثبت تسک جدید"))
+        self.assertFalse(is_my_tasks_text("👥 تسک‌های گروه"))
+        self.assertFalse(is_my_tasks_text(None))
+        self.assertFalse(is_my_tasks_text(""))
+
+        # Done tasks matcher
+        self.assertTrue(is_done_tasks_text("✅ تسک‌های انجام‌شده"))
+        self.assertTrue(is_done_tasks_text("تسک‌های انجام شده"))
+        self.assertTrue(is_done_tasks_text("تسک های انجام شده"))
+        self.assertFalse(is_done_tasks_text("📌 تسک‌های من"))
+
+        # Team tasks matcher
+        self.assertTrue(is_team_tasks_text("👥 تسک‌های گروه"))
+        self.assertTrue(is_team_tasks_text("تسک‌های تیم"))
+        self.assertTrue(is_team_tasks_text("👥 همه تسک‌ها"))
+        self.assertFalse(is_team_tasks_text("📌 تسک‌های من"))
+
+    def test_defensive_date_parsing_handles_none_and_corrupt(self) -> None:
+        from services.sheets_models import parse_due_as_jalali, validate_shamsi_date
+
+        self.assertIsNone(validate_shamsi_date(None))
+        self.assertIsNone(validate_shamsi_date(""))
+        self.assertIsNone(validate_shamsi_date("bad-format"))
+        self.assertIsNone(parse_due_as_jalali(None))
+        self.assertIsNone(parse_due_as_jalali(""))
+        self.assertIsNone(parse_due_as_jalali("not-a-date"))
 
 
 if __name__ == "__main__":

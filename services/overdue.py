@@ -228,18 +228,12 @@ async def send_daily_morning_digest(bot: Bot) -> None:
 
 async def overdue_supervisor(bot: Bot) -> None:
     """Background loop: sync colors + remind assignees about overdue tasks."""
-    await asyncio.sleep(8)
-    try:
-        status_stats = await SheetsAsync.sync_tasks_status_from_personal()
-        logger.info("Tasks status synced from personal tabs: %s", status_stats)
-    except Exception:
-        logger.exception("Tasks status sync from personal tabs failed")
-    remaining = max(0.0, OVERDUE_STARTUP_DELAY_SEC - 8)
-    if remaining:
-        await asyncio.sleep(remaining)
+    # Allow full startup warmup quota to replenish before running background synchronization
+    await asyncio.sleep(max(60.0, OVERDUE_STARTUP_DELAY_SEC))
     while True:
         try:
-            await SheetsAsync.sync_tasks_status_from_personal()
+            status_stats = await SheetsAsync.sync_tasks_status_from_personal()
+            logger.info("Tasks status synced from personal tabs: %s", status_stats)
         except Exception:
             logger.exception("Tasks status sync from personal tabs failed")
         try:

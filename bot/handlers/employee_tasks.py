@@ -18,6 +18,9 @@ from bot.keyboards import (
     cancel_flow_keyboard,
     edit_due_date_inline_keyboard,
     edit_priority_inline_keyboard,
+    is_done_tasks_text,
+    is_my_tasks_text,
+    is_team_tasks_text,
     task_detail_keyboard,
     task_list_keyboard,
     team_users_keyboard,
@@ -141,7 +144,7 @@ def _format_task_overview(title: str, tasks: list[Task]) -> tuple[str, list[Task
     for t in tasks:
         if t.status in ("done", "cancelled"):
             continue
-        due = parse_due_as_jalali(t.due_date)
+        due = parse_due_as_jalali(t.due_date) if t.due_date else None
         if due is not None and due < today:
             overdue_tasks.append(t)
         elif due is not None and due == today:
@@ -156,25 +159,32 @@ def _format_task_overview(title: str, tasks: list[Task]) -> tuple[str, list[Task
     lines: list[str] = [f"<b>{title}</b> ({len(tasks)} مورد)\n"]
 
     if today_tasks:
-        lines.append("📅 <b>تسک‌های امروز:</b>")
-        for t in today_tasks:
-            lines.append(f"  ▫️ {esc(t.title)} (📁 {esc(t.project)})")
+        lines.append(f"📅 <b>تسک‌های امروز ({len(today_tasks)} مورد):</b>")
+        for t in today_tasks[:10]:
+            proj_str = f" (📁 {esc(t.project)})" if t.project else ""
+            lines.append(f"  ▫️ {esc(t.title)}{proj_str}")
+        if len(today_tasks) > 10:
+            lines.append(f"  ... و {len(today_tasks) - 10} تسک دیگر")
         lines.append("")
 
     if overdue_tasks:
-        lines.append("🔴 <b>تسک‌های معوقه:</b>")
-        for t in overdue_tasks:
+        lines.append(f"🔴 <b>تسک‌های معوقه ({len(overdue_tasks)} مورد):</b>")
+        for t in overdue_tasks[:10]:
             due_str = f" | ⏱ ددلاین: {esc(t.due_date)}" if t.due_date else ""
-            lines.append(f"  ▫️ {esc(t.title)} (📁 {esc(t.project)}{due_str})")
+            proj_str = f" (📁 {esc(t.project)})" if t.project else ""
+            lines.append(f"  ▫️ {esc(t.title)}{proj_str}{due_str}")
+        if len(overdue_tasks) > 10:
+            lines.append(f"  ... و {len(overdue_tasks) - 10} تسک دیگر")
         lines.append("")
 
     if other_tasks:
         lines.append(f"⏳ <b>سایر تسک‌ها ({len(other_tasks)} مورد):</b>")
-        for t in other_tasks[:6]:
+        for t in other_tasks[:10]:
             due_str = f" | ⏱ ددلاین: {esc(t.due_date)}" if t.due_date else ""
-            lines.append(f"  ▫️ {esc(t.title)} (📁 {esc(t.project)}{due_str})")
-        if len(other_tasks) > 6:
-            lines.append(f"  ... و {len(other_tasks) - 6} تسک دیگر")
+            proj_str = f" (📁 {esc(t.project)})" if t.project else ""
+            lines.append(f"  ▫️ {esc(t.title)}{proj_str}{due_str}")
+        if len(other_tasks) > 10:
+            lines.append(f"  ... و {len(other_tasks) - 10} تسک دیگر")
         lines.append("")
 
     lines.append("👇 برای مشاهده جزئیات یا تغییر وضعیت، تسک را انتخاب کنید:")
@@ -213,14 +223,28 @@ async def send_task_list(
         return
 
     text, sorted_tasks = _format_task_overview(title, tasks)
-    await message.answer(
-        text,
-        reply_markup=task_list_keyboard(sorted_tasks),
-        parse_mode="HTML",
-    )
+    markup = task_list_keyboard(sorted_tasks)
+    try:
+        await message.answer(
+            text,
+            reply_markup=markup,
+            parse_mode="HTML",
+        )
+    except Exception:
+        plain = (
+            text.replace("<b>", "")
+            .replace("</b>", "")
+            .replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+        )
+        await message.answer(
+            plain,
+            reply_markup=markup,
+        )
 
 
-@router.message(F.text.in_(TEAM_TASKS_TEXTS))
+@router.message(F.text.func(is_team_tasks_text))
 async def list_all_tasks(message: Message, state: FSMContext) -> None:
     await state.clear()
     await _show_team_user_picker(message)
@@ -305,7 +329,7 @@ async def list_user_tasks_page(callback: CallbackQuery) -> None:
     )
 
 
-@router.message(F.text.in_(MY_TASKS_ALL_TEXTS))
+@router.message(F.text.func(is_my_tasks_text))
 async def list_my_tasks(message: Message, state: FSMContext) -> None:
     await state.clear()
     if message.from_user is None:
@@ -313,7 +337,7 @@ async def list_my_tasks(message: Message, state: FSMContext) -> None:
     await send_task_list(message, message.from_user.id, status=None, scope="own")
 
 
-@router.message(F.text.in_(DONE_TASKS_TEXTS))
+@router.message(F.text.func(is_done_tasks_text))
 async def list_done_tasks(message: Message, state: FSMContext) -> None:
     await state.clear()
     if message.from_user is None:
@@ -332,10 +356,30 @@ async def callback_task_list(callback: CallbackQuery) -> None:
         return
 
     tasks = await SheetsAsync.get_tasks_for_assignee(auth.personnel)
-    await callback.message.edit_text(
-        f"📌 تسک‌های شما ({len(tasks)} مورد):",
-        reply_markup=task_list_keyboard(tasks),
-    )
+    if not tasks:
+        await callback.message.edit_text("📌 تسک‌های من\n\nتسکی یافت نشد.")
+        return
+
+    text, sorted_tasks = _format_task_overview("📌 تسک‌های من", tasks)
+    markup = task_list_keyboard(sorted_tasks)
+    try:
+        await callback.message.edit_text(
+            text,
+            reply_markup=markup,
+            parse_mode="HTML",
+        )
+    except Exception:
+        plain = (
+            text.replace("<b>", "")
+            .replace("</b>", "")
+            .replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+        )
+        await callback.message.edit_text(
+            plain,
+            reply_markup=markup,
+        )
 
 
 @router.callback_query(F.data.startswith("task:page:"))
@@ -401,17 +445,23 @@ async def callback_task_filter(callback: CallbackQuery) -> None:
     await callback.answer()
 
     tasks = await SheetsAsync.get_tasks_for_assignee(auth.personnel)
-    today_str = resolve_shamsi_date_offset(0) or ""
+    today = tehran_today()
 
-    if filter_mode == "high":
-        filtered = [t for t in tasks if (t.priority or "").lower() == "high"]
+    if filter_mode == "overdue":
+        filtered = [
+            t for t in tasks
+            if t.due_date and parse_due_as_jalali(t.due_date) is not None and parse_due_as_jalali(t.due_date) < today
+        ]
     elif filter_mode == "today":
+        today_str = resolve_shamsi_date_offset(0) or ""
         filtered = [t for t in tasks if t.due_date and t.due_date.strip() == today_str]
+    elif filter_mode == "high":
+        filtered = [t for t in tasks if (t.priority or "").lower() == "high"]
     else:
         filter_mode = "all"
         filtered = tasks
 
-    label_map = {"all": "همه", "high": "⚡ فوری", "today": "📅 امروز"}
+    label_map = {"all": "همه", "overdue": "🔴 معوق", "today": "📅 امروز", "high": "⚡ فوری"}
     await callback.message.edit_text(
         f"📌 تسک‌های شما [{label_map.get(filter_mode, 'همه')}] ({len(filtered)} مورد):",
         reply_markup=task_list_keyboard(filtered, active_filter=filter_mode),

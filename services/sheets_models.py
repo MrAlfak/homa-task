@@ -969,7 +969,9 @@ def resolve_shamsi_date_offset(
     return None
 
 
-def validate_shamsi_date(value: str) -> str | None:
+def validate_shamsi_date(value: str | None) -> str | None:
+    if not value or not isinstance(value, str):
+        return None
     clean = value.strip().lstrip("'").replace("-", "/")
     parts = clean.split("/")
     if len(parts) != 3:
@@ -977,7 +979,7 @@ def validate_shamsi_date(value: str) -> str | None:
     try:
         year, month, day = (int(parts[0]), int(parts[1]), int(parts[2]))
         jdatetime.date(year, month, day)
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, Exception):
         return None
     return f"{year:04d}/{month:02d}/{day:02d}"
 
@@ -993,12 +995,15 @@ def normalize_sheet_title(title: str) -> str:
     return " ".join(cleaned.split())
 
 
-def parse_due_as_jalali(value: str) -> jdatetime.date | None:
-    normalized = validate_shamsi_date(value)
-    if not normalized:
+def parse_due_as_jalali(value: str | None) -> jdatetime.date | None:
+    try:
+        normalized = validate_shamsi_date(value)
+        if not normalized:
+            return None
+        year, month, day = (int(p) for p in normalized.split("/"))
+        return jdatetime.date(year, month, day)
+    except Exception:
         return None
-    year, month, day = (int(p) for p in normalized.split("/"))
-    return jdatetime.date(year, month, day)
 
 
 def jalali_to_str(day: jdatetime.date) -> str:

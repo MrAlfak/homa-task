@@ -2062,6 +2062,7 @@ class SheetsService:
             if self._personal_sheet_uses_tasks_filter(worksheet):
                 continue
             all_values = worksheet.get_all_values()
+            time.sleep(0.08)  # Gentle pacing to avoid burst rate-limiting
             if len(all_values) <= 1:
                 continue
             headers = all_values[0]
@@ -2081,7 +2082,9 @@ class SheetsService:
 
     def sync_tasks_status_from_personal(self) -> dict[str, int]:
         """Write personal-tab وضعیت onto matching rows in Tasks."""
-        self.ensure_tasks_status_column()
+        if not getattr(self, "_tasks_status_col_verified", False):
+            self.ensure_tasks_status_column()
+            self._tasks_status_col_verified = True
         all_values = self._tasks_ws.get_all_values()
         if len(all_values) <= 1:
             return {"updated": 0, "scanned": 0, "tabs": 0}

@@ -41,16 +41,39 @@ CREATE_TASK_TEXTS = frozenset({
     "➕ثبت تسک جدید",
 })
 
-MY_TASKS_TEXTS = frozenset({MY_TASKS_BUTTON, "تسک‌های من", "تسک های من"})
-ADMIN_MY_TASKS_TEXTS = frozenset({ADMIN_MY_TASKS_BUTTON, "📋تسک‌های من"})
+MY_TASKS_TEXTS = frozenset(
+    {MY_TASKS_BUTTON, "تسک‌های من", "تسک های من", "📌تسک‌های من", "📌تسک های من"}
+    | {f"📌 تسک‌های من ({i})" for i in range(1, 101)}
+    | {f"📌 تسک های من ({i})" for i in range(1, 101)}
+    | {f"📌تسک‌های من ({i})" for i in range(1, 101)}
+    | {f"📌تسک های من ({i})" for i in range(1, 101)}
+)
+ADMIN_MY_TASKS_TEXTS = frozenset(
+    {ADMIN_MY_TASKS_BUTTON, "📋تسک‌های من", "📋تسک های من", "📋 تسک های من"}
+    | {f"📋 تسک‌های من ({i})" for i in range(1, 101)}
+    | {f"📋 تسک های من ({i})" for i in range(1, 101)}
+    | {f"📋تسک‌های من ({i})" for i in range(1, 101)}
+    | {f"📋تسک های من ({i})" for i in range(1, 101)}
+)
 MY_TASKS_ALL_TEXTS = MY_TASKS_TEXTS | ADMIN_MY_TASKS_TEXTS
-DONE_TASKS_TEXTS = frozenset({DONE_TASKS_BUTTON, "تسک‌های انجام‌شده", "تسک های انجام شده"})
+DONE_TASKS_TEXTS = frozenset({
+    DONE_TASKS_BUTTON,
+    "تسک‌های انجام‌شده",
+    "تسک‌های انجام شده",
+    "تسک های انجام شده",
+    "✅ تسک‌های انجام شده",
+    "✅ تسک های انجام شده",
+})
 TEAM_TASKS_TEXTS = frozenset({
     TEAM_TASKS_BUTTON,
     "👥 تسک کارمندان",
     "👥 همه تسک‌ها",
     "تسک‌های گروه",
     "تسک های گروه",
+    "تسک‌های تیم",
+    "تسک های تیم",
+    "👥 تسک‌های تیم",
+    "👥 تسک های تیم",
 })
 IDEAS_TEXTS = frozenset({IDEAS_BUTTON, "ایده‌ها", "ایده ها"})
 FILMING_TEXTS = frozenset({FILMING_BUTTON, "تصویر برداری", "تصویربرداری"})
@@ -95,11 +118,51 @@ def is_my_tasks_text(text: str | None) -> bool:
     t = text.strip()
     if t in MY_TASKS_ALL_TEXTS:
         return True
+    normalized = (
+        t.replace("\u064a", "\u06cc")  # ي -> ی
+        .replace("\u0643", "\u06a9")  # ك -> ک
+        .replace("\u200c", " ")       # نیم‌فاصله -> فاصله
+        .replace("📌", "")
+        .replace("📋", "")
+        .strip()
+    )
+    return normalized.startswith("تسک های من")
+
+
+def is_done_tasks_text(text: str | None) -> bool:
+    if not text:
+        return False
+    t = text.strip()
+    if t in DONE_TASKS_TEXTS:
+        return True
+    normalized = (
+        t.replace("\u064a", "\u06cc")
+        .replace("\u0643", "\u06a9")
+        .replace("\u200c", " ")
+        .replace("✅", "")
+        .strip()
+    )
+    return normalized.startswith("تسک های انجام شده")
+
+
+def is_team_tasks_text(text: str | None) -> bool:
+    if not text:
+        return False
+    t = text.strip()
+    if t in TEAM_TASKS_TEXTS:
+        return True
+    normalized = (
+        t.replace("\u064a", "\u06cc")
+        .replace("\u0643", "\u06a9")
+        .replace("\u200c", " ")
+        .replace("👥", "")
+        .strip()
+    )
     return (
-        t.startswith("📌 تسک‌های من")
-        or t.startswith("📋 تسک‌های من")
-        or t.startswith("تسک‌های من")
-        or t.startswith("تسک های من")
+        normalized.startswith("تسک های گروه")
+        or normalized.startswith("تسک های تیم")
+        or normalized.startswith("تسک کارمندان")
+        or normalized.startswith("همه تسک ها")
     )
 
 
@@ -109,7 +172,7 @@ def is_menu_text(text: str | None) -> bool:
     t = text.strip()
     if t in REPLY_MENU_TEXTS:
         return True
-    return is_my_tasks_text(t)
+    return is_my_tasks_text(t) or is_done_tasks_text(t) or is_team_tasks_text(t)
 
 STATUS_LABELS = {
     "pending": "⏳ در انتظار",
@@ -667,30 +730,24 @@ def task_list_keyboard(
 
     if len(tasks) > 2 or active_filter != "all":
         f_all = "🔘 همه" if active_filter == "all" else "همه"
-        f_high = "🔘 ⚡ فوری" if active_filter == "high" else "⚡ فوری"
+        f_overdue = "🔘 🔴 معوق" if active_filter == "overdue" else "🔴 معوق"
         f_today = "🔘 📅 امروز" if active_filter == "today" else "📅 امروز"
         buttons.append([
             InlineKeyboardButton(text=f_all, callback_data="taskfilter:all"),
-            InlineKeyboardButton(text=f_high, callback_data="taskfilter:high"),
+            InlineKeyboardButton(text=f_overdue, callback_data="taskfilter:overdue"),
             InlineKeyboardButton(text=f_today, callback_data="taskfilter:today"),
         ])
 
     for task in page_items:
         prefix = STATUS_LABELS.get(task.status, task.status)
         if show_assignee and task.assignee_name:
-            label = f"{prefix} | {task.assignee_name[:16]} | {task.title[:24]}"
+            label = f"{prefix} | {task.assignee_name[:16]} | {task.title[:28]}"
         else:
-            label = f"{prefix} | {task.title[:30]}"
+            label = f"{prefix} | {task.title[:38]}"
 
-        if task.status in ("pending", "in_progress"):
-            buttons.append([
-                InlineKeyboardButton(text=label[:50], callback_data=f"task:view:{task.id}"),
-                InlineKeyboardButton(text="✅ انجام", callback_data=f"task:quickdone:{task.id}"),
-            ])
-        else:
-            buttons.append(
-                [InlineKeyboardButton(text=label[:64], callback_data=f"task:view:{task.id}")]
-            )
+        buttons.append(
+            [InlineKeyboardButton(text=label[:64], callback_data=f"task:view:{task.id}")]
+        )
 
     if not buttons:
         buttons.append([InlineKeyboardButton(text="تسکی یافت نشد", callback_data="noop")])
