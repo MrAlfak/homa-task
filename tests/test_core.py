@@ -303,7 +303,46 @@ class ModelTests(unittest.TestCase):
         self.assertFalse(personnel_from_record(off_record, 9).telegram_notify)
         self.assertEqual(normalize_mobile("+989121111111"), "9121111111")
         self.assertEqual(normalize_mobile("۰۹۱۲۱۱۱۱۱۱۱"), "9121111111")
+        self.assertEqual(normalize_mobile("٠٩١٢١١١١١١١"), "9121111111")
+        self.assertEqual(normalize_mobile("0989121111111"), "9121111111")
+        self.assertEqual(normalize_mobile("989121111111"), "9121111111")
+        self.assertEqual(normalize_mobile("9121111111.0"), "9121111111")
+        self.assertEqual(normalize_mobile("0912 111 1111"), "9121111111")
+        self.assertEqual(normalize_mobile("+98 912 111 1111"), "9121111111")
+        self.assertEqual(normalize_mobile("0912-111-1111"), "9121111111")
+        self.assertEqual(normalize_mobile("09121111111 (واتساپ)"), "9121111111")
+        self.assertEqual(normalize_mobile("09121111111 / 09352222222"), "9121111111")
+        self.assertEqual(normalize_mobile("02188888888"), "")
         self.assertEqual(normalize_mobile("123"), "")
+
+    def test_parse_bool_and_name_normalization(self) -> None:
+        from services.sheets_models import normalize_name, parse_bool
+
+        self.assertTrue(parse_bool(True))
+        self.assertFalse(parse_bool(False))
+        self.assertTrue(parse_bool("TRUE"))
+        self.assertTrue(parse_bool("1"))
+        self.assertTrue(parse_bool("بله"))
+        self.assertTrue(parse_bool("فعال"))
+        self.assertTrue(parse_bool("دارد"))
+        self.assertTrue(parse_bool("صحیح"))
+        self.assertFalse(parse_bool("FALSE"))
+        self.assertFalse(parse_bool("0"))
+        self.assertFalse(parse_bool(""))
+
+        self.assertEqual(normalize_name("  علي  "), "علی")
+        self.assertEqual(normalize_name("بانك"), "بانک")
+
+    def test_personnel_sms_aliases(self) -> None:
+        rec1 = {"نام": "محمد", "شماره تماس": "09123334444", "پیامک": "بله"}
+        p1 = personnel_from_record(rec1, 10)
+        self.assertEqual(p1.mobile, "9123334444")
+        self.assertTrue(p1.sms_enabled)
+
+        rec2 = {"Name": "رضا", "تلفن همراه": "09125556666", "ارسال sms": "TRUE"}
+        p2 = personnel_from_record(rec2, 20)
+        self.assertEqual(p2.mobile, "9125556666")
+        self.assertTrue(p2.sms_enabled)
 
     def test_coalesce_keeps_mobile_from_duplicate_row(self) -> None:
         left = Personnel(telegram_id=1, name="Ali", role="admin", active=True)

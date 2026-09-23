@@ -375,19 +375,20 @@ async def content_type_selected(callback: CallbackQuery, state: FSMContext) -> N
         assignee = None
 
     if assignee is not None:
-        try:
-            await callback.message.bot.send_message(
-                assignee.telegram_id,
-                f"✍️ <b>دیزاین / تولید محتوا جدید</b>\n\n{_format_entry(entry)}",
-                parse_mode="HTML",
-            )
-        except Exception:
-            logger.warning("content notify failed for %s", assignee.telegram_id, exc_info=True)
-            await safe_answer(
-                callback.message,
-                f"⚠️ ثبت شد، ولی اعلان به <b>{esc(assignee.name)}</b> ارسال نشد.",
-                parse_mode="HTML",
-            )
+        if assignee.telegram_id > 0:
+            try:
+                await callback.message.bot.send_message(
+                    assignee.telegram_id,
+                    f"✍️ <b>دیزاین / تولید محتوا جدید</b>\n\n{_format_entry(entry)}",
+                    parse_mode="HTML",
+                )
+            except Exception:
+                logger.warning("content notify failed for %s", assignee.telegram_id, exc_info=True)
+                await safe_answer(
+                    callback.message,
+                    f"⚠️ ثبت شد، ولی اعلان به <b>{esc(assignee.name)}</b> ارسال نشد.",
+                    parse_mode="HTML",
+                )
         try:
             from services.sms import notify_content, schedule
 

@@ -281,6 +281,8 @@ async def employee_selected(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(
         assignee_id=employee.telegram_id,
         assignee_name=employee.name,
+        assignee_mobile=employee.mobile,
+        assignee_sms_enabled=employee.sms_enabled,
         project_list=projects,
     )
     await state.set_state(CreateTaskStates.choosing_project)
@@ -392,6 +394,8 @@ async def handle_quick_task(message: Message, state: FSMContext) -> None:
         creator_name=person.name,
         assignee_id=emp.telegram_id,
         assignee_name=emp.name,
+        assignee_mobile=emp.mobile,
+        assignee_sms_enabled=emp.sms_enabled,
         project=result["project"],
         title=result["title"],
         priority=result["priority"],
@@ -598,6 +602,8 @@ async def _finalize_task(message: Message | None, from_user, state: FSMContext) 
 
         assignee_id = data.get("assignee_id")
         assignee_name = data.get("assignee_name", "")
+        assignee_mobile = data.get("assignee_mobile", "")
+        assignee_sms_enabled = bool(data.get("assignee_sms_enabled", False))
         title = data.get("title", "")
         project = data.get("project", "")
         priority = data.get("priority", "Medium")
@@ -636,6 +642,8 @@ async def _finalize_task(message: Message | None, from_user, state: FSMContext) 
             name=assignee_name,
             role="employee",
             active=True,
+            mobile=assignee_mobile,
+            sms_enabled=assignee_sms_enabled,
         )
 
         try:
@@ -666,7 +674,26 @@ async def _finalize_task(message: Message | None, from_user, state: FSMContext) 
         except Exception:
             logger.warning("personnel lookup after create_task failed", exc_info=True)
             full = None
+        if full is None:
+            try:
+                full = await SheetsAsync.find_personnel_by_name_hint(assignee_name)
+            except Exception:
+                full = None
         target = full or assignee
+        if not target.mobile and assignee_mobile:
+            target = Personnel(
+                telegram_id=target.telegram_id,
+                name=target.name,
+                role=target.role,
+                active=target.active,
+                senior_admin=target.senior_admin,
+                view_all_tasks=target.view_all_tasks,
+                filming_access=target.filming_access,
+                content_access=target.content_access,
+                mobile=assignee_mobile,
+                sms_enabled=target.sms_enabled or assignee_sms_enabled,
+                telegram_notify=target.telegram_notify,
+            )
 
         sent = await send_new_task_pv(message.bot, target, task, creator_name)
         if not sent:

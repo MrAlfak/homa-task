@@ -104,7 +104,8 @@ def format_content_sms(entry: ContentEntry) -> str:
 
 
 def _result_ok(value: Any) -> bool:
-    return str(value).strip() == "1"
+    cleaned = str(value or "").strip().lower()
+    return cleaned in {"1", "true", "ok", "success"}
 
 
 def _extract_send_id(payload: Any) -> str:
@@ -369,8 +370,16 @@ async def notify_people(
             text_code=pattern,
             text_data=vars_,
         )
+        fallback_used = False
+        pattern_error = ""
         if pattern and not result.ok and not result.skipped:
-            result = await asyncio.to_thread(
+            pattern_error = result.description or result.result_code or "خطا در ارسال پترن"
+            logger.warning(
+                "Pattern SMS failed for %s (%s); trying plain text fallback...",
+                person.name,
+                pattern_error,
+            )
+            fallback_res = await asyncio.to_thread(
                 post_sms,
                 api_key=api_key,
                 api_url=config.sms_api_url,
@@ -380,14 +389,22 @@ async def notify_people(
                 send_type=settings.send_type,
                 try_send=settings.try_send,
             )
+            result = fallback_res
+            fallback_used = True
+
+        status = "ok" if result.ok else "fail"
+        detail = result.description or result.result_code
+        if fallback_used:
+            detail = f"پترن ناموفق ({pattern_error}) -> متن ساده: {detail}"
+
         await _append_sms_log(
             name=person.name,
             mobile=mobile,
             kind=event,
             text=body,
             send_id=result.send_id,
-            status="ok" if result.ok else "fail",
-            detail=result.description or result.result_code,
+            status=status,
+            detail=detail,
         )
         if result.ok:
             logger.info("SMS sent event=%s name=%s", event, person.name)

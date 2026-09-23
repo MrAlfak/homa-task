@@ -14,6 +14,7 @@ from services.sheets_models import (
     TemplateEntry,
     jalali_to_str,
     next_run_on_or_after,
+    normalize_name,
     parse_due_as_jalali,
     tehran_today,
     template_is_due,
@@ -41,13 +42,13 @@ def _next_after_today(entry: TemplateEntry, today: jdatetime.date) -> str:
 
 
 def _match_person(name: str, people: list[Personnel]) -> Personnel | None:
-    needle = name.strip().lower()
-    exact = [person for person in people if person.name.strip().lower() == needle]
+    needle = normalize_name(name).lower()
+    exact = [person for person in people if normalize_name(person.name).lower() == needle]
     if len(exact) == 1:
         return exact[0]
     if exact:
         return exact[0]
-    contains = [person for person in people if needle in person.name.lower()]
+    contains = [person for person in people if needle in normalize_name(person.name).lower()]
     if len(contains) == 1:
         return contains[0]
     return None
@@ -69,7 +70,7 @@ async def run_template_pass(bot: Bot) -> int:
         return 0
 
     try:
-        people = await SheetsAsync.get_active_personnel()
+        people = await SheetsAsync.get_all_active_personnel()
     except Exception:
         logger.exception("قالب personnel read failed")
         return 0

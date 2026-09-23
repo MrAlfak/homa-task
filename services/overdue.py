@@ -16,7 +16,13 @@ from bot.formatting import esc
 from config import config
 from services.sheets import Personnel, Task
 from services.sheets_async import SheetsAsync
-from services.sheets_models import TEHRAN_TZ, tehran_now, tehran_today, today_jalali_str
+from services.sheets_models import (
+    TEHRAN_TZ,
+    normalize_name,
+    tehran_now,
+    tehran_today,
+    today_jalali_str,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,8 +94,12 @@ async def _notify_group(bot: Bot, overdue: list[Task], notified: dict[str, str],
 
 
 async def _personnel_by_name() -> dict[str, Personnel]:
-    people = await SheetsAsync.get_active_personnel()
-    return {p.name: p for p in people}
+    people = await SheetsAsync.get_all_active_personnel()
+    mapping: dict[str, Personnel] = {}
+    for p in people:
+        mapping[p.name.strip()] = p
+        mapping[normalize_name(p.name).lower()] = p
+    return mapping
 
 
 async def run_overdue_pass(bot: Bot) -> None:
@@ -136,29 +146,32 @@ async def run_overdue_pass(bot: Bot) -> None:
     name_map = await _personnel_by_name()
     sent = 0
     for name, tasks in by_assignee.items():
-        person = name_map.get(name)
-        if person is None or person.telegram_id <= 0:
-            logger.warning("Overdue notify skipped — no telegram id for %r", name)
+        clean_name = normalize_name(name).lower()
+        person = name_map.get(name.strip()) or name_map.get(clean_name)
+        if person is None:
+            logger.warning("Overdue notify skipped — unknown assignee %r", name)
             continue
-        try:
-            await bot.send_message(
-                person.telegram_id,
-                _format_assignee_digest(tasks),
-                parse_mode="HTML",
-            )
-            sent += 1
-            for task in tasks:
-                notified[_notify_key(task)] = today_str
-        except Exception:
-            logger.warning(
-                "Overdue notify failed for %s (%s)",
-                name,
-                person.telegram_id,
-                exc_info=True,
-            )
+
+        if person.telegram_id > 0:
+            try:
+                await bot.send_message(
+                    person.telegram_id,
+                    _format_assignee_digest(tasks),
+                    parse_mode="HTML",
+                )
+                sent += 1
+                for task in tasks:
+                    notified[_notify_key(task)] = today_str
+            except Exception:
+                logger.warning(
+                    "Overdue notify failed for %s (%s)",
+                    name,
+                    person.telegram_id,
+                    exc_info=True,
+                )
 
         sms_key = f"sms|{name}"
-        if notified.get(sms_key) != today_str:
+        if notified.get(sms_key) != today_str and person.sms_enabled:
             try:
                 from services.sms import notify_overdue
 

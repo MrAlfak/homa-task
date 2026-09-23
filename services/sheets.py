@@ -67,10 +67,12 @@ from services.sheets_models import (
     TemplateEntry,
     coalesce_personnel,
     date_for_sheet,
+    PERSONNEL_NAME_KEYS,
     get_jalali_period_dates,
     is_blank_task_cell,
     is_general_project,
     is_personnel_bool_header,
+    normalize_name,
     normalize_sheet_title,
     normalize_status,
     overlay_status_from_personal,
@@ -83,6 +85,7 @@ from services.sheets_models import (
     recent_shamsi_dates,
     record_is_active,
     record_telegram_id,
+    record_value,
     resolve_shamsi_date_offset,
     role_label,
     row_to_dict,
@@ -1734,18 +1737,37 @@ class SheetsService:
 
     def find_personnel_by_name_hint(self, name_hint: str) -> Personnel | None:
         """Find active personnel whose name contains the hint (e.g. column surname)."""
-        hint = name_hint.strip()
+        hint = normalize_name(name_hint).lower()
         if not hint:
             return None
+        # First check among active personnel with Telegram ID
         matches = [
             member
             for member in self.get_active_personnel()
-            if hint in member.name
+            if hint in normalize_name(member.name).lower()
+            or normalize_name(member.name).lower() in hint
         ]
         if len(matches) == 1:
             return matches[0]
-        exact = [m for m in matches if m.name.strip() == hint]
-        return exact[0] if len(exact) == 1 else (matches[0] if matches else None)
+        exact = [m for m in matches if normalize_name(m.name).lower() == hint]
+        if len(exact) == 1:
+            return exact[0]
+        if matches:
+            return matches[0]
+
+        # Fallback: search all records directly, even if telegram_id is not set
+        records = self._get_personnel_records()
+        for record in records:
+            if not self._record_is_active(record):
+                continue
+            raw_name = record_value(record, PERSONNEL_NAME_KEYS)
+            if not raw_name:
+                continue
+            clean = normalize_name(raw_name).lower()
+            if hint in clean or clean in hint:
+                tid = self._record_telegram_id(record) or 0
+                return self._personnel_from_record(record, tid)
+        return None
 
     _personnel_from_record = staticmethod(personnel_from_record)
 
@@ -1873,6 +1895,26 @@ class SheetsService:
 
     def get_active_employees(self) -> list[Personnel]:
         return self.get_active_personnel(role="employee")
+
+    def get_all_active_personnel(self) -> list[Personnel]:
+        """All active personnel rows, including those without a Telegram ID (tid=0)."""
+        records = self._get_personnel_records()
+        seen: dict[str, Personnel] = {}
+        for record in records:
+            if not self._record_is_active(record):
+                continue
+            name = record_value(record, PERSONNEL_NAME_KEYS)
+            if not name:
+                continue
+            tid = self._record_telegram_id(record) or 0
+            person = self._personnel_from_record(record, tid)
+            key = f"{person.name.strip().lower()}|{tid}"
+            existing = seen.get(key)
+            if existing is None:
+                seen[key] = person
+            else:
+                seen[key] = coalesce_personnel(existing, person)
+        return sorted(seen.values(), key=lambda p: p.name)
 
     def get_projects(self) -> list[str]:
         """Cached Projects list (Sheets API calls are rate-limited per minute)."""

@@ -122,6 +122,10 @@ class SheetsAsync:
         return await run_blocking(cls._svc().get_active_personnel, role)
 
     @classmethod
+    async def get_all_active_personnel(cls) -> list[Personnel]:
+        return await run_blocking(cls._svc().get_all_active_personnel)
+
+    @classmethod
     async def get_personnel_by_telegram_id(
         cls, telegram_id: int, role: str | None = None
     ) -> Personnel | None:

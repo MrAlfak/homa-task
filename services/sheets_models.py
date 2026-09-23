@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import datetime
+import re
+from typing import Any
 
 import jdatetime
 
@@ -67,8 +69,8 @@ PERSONNEL_BOOL_HEADER_ALIASES: tuple[tuple[str, ...], ...] = (
     ("view_all_tasks", "مشاهده همه تسک"),
     ("filming_access", "تصویر برداری"),
     ("content_access", "تولید محتوا"),
-    ("sms_enabled", "ارسال پیامک"),
-    ("telegram_notify", "ارسال تلگرام"),
+    ("sms_enabled", "ارسال پیامک", "پیامک", "اس ام اس", "ارسال sms", "ارسال اس ام اس"),
+    ("telegram_notify", "ارسال تلگرام", "پیام تلگرام"),
     ("reports_access", "گزارش مدیر"),
     ("report_status", "گزارش وضعیت"),
     ("report_people", "گزارش نفرات"),
@@ -91,14 +93,28 @@ PERSONNEL_MOBILE_KEYS = (
     "phone",
     "شماره موبایل",
     "شماره",
+    "شماره تماس",
+    "تلفن همراه",
+    "تلفن",
 )
 PERSONNEL_MOBILE_HEADER_ALIASES = (
     "موبایل",
     "mobile",
     "phone",
     "شماره موبایل",
+    "شماره تماس",
+    "تلفن همراه",
+    "تلفن",
 )
-PERSONNEL_SMS_KEYS = ("ارسال پیامک", "sms_enabled", "sms")
+PERSONNEL_SMS_KEYS = (
+    "ارسال پیامک",
+    "پیامک",
+    "sms_enabled",
+    "sms",
+    "ارسال sms",
+    "اس ام اس",
+    "ارسال اس ام اس",
+)
 PERSONNEL_TELEGRAM_NOTIFY_KEYS = (
     "ارسال تلگرام",
     "telegram_notify",
@@ -317,16 +333,16 @@ SMS_LOG_HEADERS = [
 ]
 SMS_SETTINGS_DEFAULT_ROWS: tuple[tuple[str, str, str], ...] = (
     ("فعال", "FALSE", "تا وقتی FALSE است هیچ پیامکی ارسال نمی‌شود"),
-    ("شماره فرستنده", "9998882753", "شماره خط پنل پیامک (از)"),
+    ("شماره فرستنده", "9998882753", "شماره خط پیامک (ترجیحاً خط خدماتی باشد تا به بلک‌لیست مخابرات بخورد نکند)"),
     ("نوع ارسال", "1", "1=پیام کوتاه  2=صوتی  3=واتساپ  4=بله  5=آی‌گپ"),
     ("تلاش مجدد", "2", "اگر ارسال خطا داد، چند بار تکرار شود (۰ تا ۱۰)"),
     ("پیامک هنگام ثبت تسک", "TRUE", "بعد از ثبت تسک / تصویربرداری / دیزاین برای مسئول پیامک برود"),
     ("پیامک تسک عقب‌افتاده", "TRUE", "یادآوری روزانه تسک‌های عقب‌افتاده"),
     ("پیامک اطلاعیه همگانی", "FALSE", "همراه اعلان تلگرام، پیامک کوتاه هم برود"),
-    ("پترن تسک جدید", "", "کد الگو از پنل. اگر خالی باشد متن آزاد ارسال می‌شود"),
-    ("پترن عقب‌افتاده", "", "کد الگوی یادآوری ددلاین"),
+    ("پترن تسک جدید", "", "کد الگو برای عبور از بلک‌لیست. متغیرها: {0}نام {1}عنوان {2}پروژه {3}اولویت {4}ایجادکننده {5}ددلاین"),
+    ("پترن عقب‌افتاده", "", "کد الگوی ددلاین گذشته. متغیرها: {0}نام {1}لیست تسک‌ها"),
     ("پترن اطلاعیه", "", "کد الگوی اطلاعیه همگانی"),
-    ("قالب شماره", "9xxxxxxxxx", "در ستون موبایل پرسنل: بدون صفر و بدون +۹۸ مثل 9120000000"),
+    ("قالب شماره", "09xxxxxxxxx", "در ستون موبایل پرسنل: با صفر یا بدون صفر یا با ۹۸+ همگی پشتیبانی می‌شوند"),
     ("نکته کلید اتصال", "فقط در سرور", "API Key را در شیت نگذارید؛ باید SMS_API_KEY در env سرور باشد"),
     ("نکته آی‌پی", "whitelist", "آی‌پی خروجی سرور را در پنل مجاز کنید"),
 )
@@ -716,22 +732,33 @@ def parse_task_id(task_id: str) -> tuple[int | None, str | None, int] | None:
         return None
 
 
+def normalize_name(name: str) -> str:
+    """Normalize Persian/Arabic characters and whitespace for resilient matching."""
+    return (name or "").strip().replace("ي", "ی").replace("ك", "ک")
+
+
 def normalize_mobile(value: str) -> str:
     """Return Iranian mobile as 10 digits starting with 9, or empty if invalid."""
     raw = str(value or "").strip().translate(_PERSIAN_DIGITS)
     if not raw:
         return ""
+    if raw.endswith(".0"):
+        raw = raw[:-2]
+    # Match standard Iranian mobile pattern (with optional +98, 0098, 098, 98, or 0)
+    m = re.search(r"(?:(?:\+|00|0)?98[-\s.]*0?|0)?(9\d{9})\b", raw)
+    if m:
+        return m.group(1)
     digits = "".join(ch for ch in raw if ch.isdigit())
     if digits.startswith("0098"):
         digits = digits[4:]
+    elif digits.startswith("098") and len(digits) >= 13:
+        digits = digits[3:]
     elif digits.startswith("98") and len(digits) >= 12:
         digits = digits[2:]
     if digits.startswith("0"):
         digits = digits.lstrip("0")
-        if not digits.startswith("9"):
-            return ""
-    if len(digits) == 10 and digits.startswith("9"):
-        return digits
+    if len(digits) >= 10 and digits.startswith("9"):
+        return digits[:10]
     return ""
 
 
@@ -739,11 +766,26 @@ def is_personnel_bool_header(key: str, header: str) -> bool:
     return key.strip().lower() in PERSONNEL_BOOL_KEYS or header.strip().lower() in PERSONNEL_BOOL_KEYS
 
 
-def parse_bool(value: str, *, default: bool = False) -> bool:
-    cleaned = value.strip()
+def parse_bool(value: Any, *, default: bool = False) -> bool:
+    if isinstance(value, bool):
+        return value
+    cleaned = str(value or "").strip()
     if not cleaned:
         return default
-    return cleaned.upper() in {"TRUE", "1", "YES", "بله", "Y"}
+    return cleaned.upper() in {
+        "TRUE",
+        "1",
+        "YES",
+        "بله",
+        "Y",
+        "OK",
+        "ON",
+        "فعال",
+        "دارد",
+        "صحیح",
+        "آره",
+        "تایید",
+    }
 
 
 def record_value(record: dict[str, str], keys: tuple[str, ...]) -> str:
