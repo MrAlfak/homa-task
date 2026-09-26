@@ -19,6 +19,7 @@ from config import BASE_DIR
 from services.sheets_models import (
     PERSIAN_MONTHS,
     Task,
+    normalize_name,
     parse_due_as_jalali,
     shamsi_today,
     tehran_today,
@@ -91,7 +92,7 @@ def render_report(kind: str, tasks: list[Task], *, kinds: tuple[str, ...] | None
         return _render_grid(panels, tasks, today, today_str, font)
     height = 6.8
     if kind == "people":
-        people = {task.assignee_name.strip() or "—" for task in _open_tasks(tasks)}
+        people = {normalize_name(task.assignee_name).strip() or "—" for task in _open_tasks(tasks)}
         height = max(7.2, 0.46 * min(MAX_PEOPLE_BARS, max(1, len(people))) + 3.2)
     fig, ax = plt.subplots(figsize=(11.6, height), facecolor=BG)
     ax.set_facecolor(BG)
@@ -226,7 +227,7 @@ def _count_open_and_overdue(tasks: list[Task], today: jdatetime.date, field: str
     opened: Counter[str] = Counter()
     overdue: Counter[str] = Counter()
     for task in _open_tasks(tasks):
-        name = (task.assignee_name if field == "assignee" else task.project).strip() or "—"
+        name = (normalize_name(task.assignee_name) if field == "assignee" else task.project).strip() or "—"
         opened[name] += 1
         due = parse_due_as_jalali(task.due_date)
         if due is not None and due < today:
@@ -245,7 +246,7 @@ def _count_people_open(tasks: list[Task], today: jdatetime.date) -> list[tuple[s
     progress: Counter[str] = Counter()
     overdue: Counter[str] = Counter()
     for task in _open_tasks(tasks):
-        name = task.assignee_name.strip() or "—"
+        name = normalize_name(task.assignee_name).strip() or "—"
         due = parse_due_as_jalali(task.due_date)
         if due is not None and due < today:
             overdue[name] += 1

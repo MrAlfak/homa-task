@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 import logging
 import os
 import time
@@ -72,6 +73,7 @@ from services.sheets_models import (
     is_blank_task_cell,
     is_general_project,
     is_personnel_bool_header,
+    matches_assignee_name,
     normalize_name,
     normalize_sheet_title,
     normalize_status,
@@ -1938,7 +1940,15 @@ class SheetsService:
         return projects
 
     def _personal_worksheet(self, employee_name: str) -> gspread.Worksheet | None:
-        return self._all_worksheets().get(employee_name)
+        if not employee_name:
+            return None
+        worksheets = self._all_worksheets()
+        if employee_name in worksheets:
+            return worksheets[employee_name]
+        for title, ws in worksheets.items():
+            if matches_assignee_name(title, employee_name) or matches_assignee_name(employee_name, title):
+                return ws
+        return None
 
     def create_task(
         self,
@@ -2037,6 +2047,8 @@ class SheetsService:
                 record.get("مسئول تسک", record.get("i", "")),
             )
         ).strip()
+        if not assignee and sheet_name != "Tasks":
+            assignee = sheet_name.strip()
         status_raw = str(record.get("وضعیت", "")).strip()
         return Task(
             sheet_name=sheet_name,
@@ -2190,23 +2202,41 @@ class SheetsService:
         return self.get_tasks_for_assignee(personnel, status=status)
 
     def get_tasks_for_assignee(self, personnel: Personnel, status: str | None = None) -> list[Task]:
-        personal_ws = self._personal_worksheet(personnel.name)
-        if personal_ws is not None:
-            return self._get_tasks_from_sheet(
-                personal_ws,
-                personnel.name,
-                PERSONAL_HEADERS,
-                personnel.name,
-                status,
-            )
-
-        return self._get_tasks_from_sheet(
+        tasks_from_main = self._get_tasks_from_sheet(
             self._tasks_ws,
             "Tasks",
             TASKS_HEADERS,
             personnel.name,
             status,
         )
+
+        personal_ws = self._personal_worksheet(personnel.name)
+        if personal_ws is None or self._personal_sheet_uses_tasks_filter(personal_ws):
+            return tasks_from_main
+
+        personal_tasks = self._get_tasks_from_sheet(
+            personal_ws,
+            personal_ws.title,
+            PERSONAL_HEADERS,
+            personnel.name,
+            status,
+        )
+
+        if not personal_tasks:
+            return tasks_from_main
+        if not tasks_from_main:
+            return personal_tasks
+
+        merged = overlay_status_from_personal(tasks_from_main, personal_tasks)
+        seen_keys = {
+            self._task_match_key(t.title, t.assignee_name, t.due_date) for t in merged
+        }
+        for pt in personal_tasks:
+            key = self._task_match_key(pt.title, pt.assignee_name, pt.due_date)
+            if key not in seen_keys:
+                seen_keys.add(key)
+                merged.append(pt)
+        return merged
 
     def _get_tasks_from_sheet(
         self,
@@ -2222,6 +2252,7 @@ class SheetsService:
 
         actual_headers = all_values[0]
         tasks: list[Task] = []
+        is_personal = (sheet_name != "Tasks" and worksheet is not self._tasks_ws)
         for index, row in enumerate(all_values[1:], start=2):
             task = self._parse_task_row(
                 sheet_name=sheet_name,
@@ -2232,7 +2263,9 @@ class SheetsService:
             )
             if task is None:
                 continue
-            if task.assignee_name != assignee_name:
+            if is_personal and not task.assignee_name:
+                task = replace(task, assignee_name=assignee_name)
+            if not matches_assignee_name(task.assignee_name, assignee_name):
                 continue
             if status is None:
                 if task.status in {"done", "cancelled"}:
@@ -2333,7 +2366,7 @@ class SheetsService:
             return None
         if can_view_all_tasks(personnel) or is_admin(personnel):
             return task
-        if task.assignee_name == personnel.name:
+        if matches_assignee_name(task.assignee_name, personnel.name):
             return task
         return None
 
@@ -2344,7 +2377,7 @@ class SheetsService:
         if task is None:
             return False
         if (
-            task.assignee_name != personnel.name
+            not matches_assignee_name(task.assignee_name, personnel.name)
             and not is_admin(personnel)
             and not is_senior_admin(personnel)
         ):

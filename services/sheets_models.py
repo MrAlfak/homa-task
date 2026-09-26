@@ -733,8 +733,85 @@ def parse_task_id(task_id: str) -> tuple[int | None, str | None, int] | None:
 
 
 def normalize_name(name: str) -> str:
-    """Normalize Persian/Arabic characters and whitespace for resilient matching."""
-    return (name or "").strip().replace("ي", "ی").replace("ك", "ک")
+    """Normalize Persian/Arabic characters, ZWNJ, and whitespace for resilient matching."""
+    if not name:
+        return ""
+    text = str(name).strip()
+    text = (
+        text.replace("ي", "ی")
+        .replace("ى", "ی")
+        .replace("ئ", "ی")
+        .replace("ك", "ک")
+        .replace("ة", "ه")
+        .replace("آ", "ا")
+        .replace("أ", "ا")
+        .replace("إ", "ا")
+    )
+    for ch in ("\u200c", "\u200b", "\u200e", "\u200f", "\ufeff", "\u00a0"):
+        text = text.replace(ch, " ")
+    return " ".join(text.split())
+
+
+def split_assignee_candidates(raw: str) -> list[str]:
+    """Split raw assignee cell by comma, semicolon, slash, newline, or ' و '."""
+    if not raw:
+        return []
+    text = (
+        str(raw)
+        .replace("،", ",")
+        .replace("؛", ",")
+        .replace(";", ",")
+        .replace("/", ",")
+        .replace("\n", ",")
+    )
+    text = re.sub(r"\s+و\s+", ",", text)
+    parts: list[str] = []
+    seen: set[str] = set()
+    for chunk in text.split(","):
+        clean = normalize_name(chunk).strip()
+        if clean.startswith("و "):
+            clean = normalize_name(clean[2:]).strip()
+        if not clean:
+            continue
+        key = clean.lower()
+        if key not in seen:
+            seen.add(key)
+            parts.append(clean)
+    return parts or [normalize_name(raw).strip()]
+
+
+def matches_assignee_name(task_assignee: str, target_name: str) -> bool:
+    """Return True if target_name matches task_assignee (resilient to formatting/multi-assignee)."""
+    norm_target = normalize_name(target_name).strip().lower()
+    if not norm_target:
+        return False
+
+    target_no_spaces = norm_target.replace(" ", "")
+    target_tokens = set(norm_target.split())
+
+    candidates = split_assignee_candidates(task_assignee)
+    for cand in candidates:
+        norm_cand = cand.lower()
+        if not norm_cand:
+            continue
+
+        if norm_cand == norm_target:
+            return True
+
+        cand_no_spaces = norm_cand.replace(" ", "")
+        if cand_no_spaces == target_no_spaces:
+            return True
+
+        cand_tokens = set(norm_cand.split())
+        if cand_tokens and target_tokens:
+            if cand_tokens.issubset(target_tokens) or target_tokens.issubset(cand_tokens):
+                return True
+
+        if len(norm_cand) >= 3 and len(norm_target) >= 3:
+            if norm_cand in norm_target or norm_target in norm_cand:
+                return True
+
+    return False
 
 
 def normalize_mobile(value: str) -> str:
@@ -1215,11 +1292,15 @@ def template_is_due(entry: TemplateEntry, today: jdatetime.date) -> bool:
 
 def task_match_key(title: str, assignee: str, due_date: str) -> str:
     due = validate_shamsi_date(due_date) or due_date.strip().lstrip("'")
-    return f"{assignee.strip().lower()}|{title.strip().lower()}|{due}"
+    clean_title = normalize_name(title).lower()
+    clean_assignee = normalize_name(assignee).lower().replace(" ", "")
+    return f"{clean_assignee}|{clean_title}|{due}"
 
 
 def task_soft_key(title: str, assignee: str) -> str:
-    return f"{assignee.strip().lower()}|{title.strip().lower()}"
+    clean_title = normalize_name(title).lower()
+    clean_assignee = normalize_name(assignee).lower().replace(" ", "")
+    return f"{clean_assignee}|{clean_title}"
 
 
 def overlay_status_from_personal(main_tasks: list[Task], personal_tasks: list[Task]) -> list[Task]:

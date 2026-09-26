@@ -333,6 +333,63 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(normalize_name("  علي  "), "علی")
         self.assertEqual(normalize_name("بانك"), "بانک")
 
+    def test_resilient_name_matching_and_candidates(self) -> None:
+        from services.sheets_models import (
+            matches_assignee_name,
+            normalize_name,
+            split_assignee_candidates,
+            task_match_key,
+            task_soft_key,
+        )
+
+        # Character normalization
+        self.assertEqual(normalize_name("علي‌رضا"), "علی رضا")
+        self.assertEqual(normalize_name("محمد  حسيني "), "محمد حسینی")
+        self.assertEqual(normalize_name("كريم"), "کریم")
+        self.assertEqual(normalize_name("فاطمة"), "فاطمه")
+        self.assertEqual(normalize_name("آرمان"), "ارمان")
+
+        # Splitting candidates
+        self.assertEqual(
+            split_assignee_candidates("مهدی بخشنده، علی رضایی"),
+            ["مهدی بخشنده", "علی رضایی"],
+        )
+        self.assertEqual(
+            split_assignee_candidates("علی و رضا"),
+            ["علی", "رضا"],
+        )
+        self.assertEqual(
+            split_assignee_candidates("سارا / مریم ; زهرا"),
+            ["سارا", "مریم", "زهرا"],
+        )
+
+        # Matching
+        self.assertTrue(matches_assignee_name("علی رضایی", "علی رضایی"))
+        self.assertTrue(matches_assignee_name("علي رضايي ", "علی رضایی"))
+        self.assertTrue(matches_assignee_name("کريم كاظمی", "کریم کاظمی"))
+        self.assertTrue(matches_assignee_name("علیرضا محمدی", "علی رضا محمدی"))
+        self.assertTrue(matches_assignee_name("رضا‌زاده", "رضازاده"))
+        self.assertTrue(matches_assignee_name("مهدی بخشنده، علی رضایی", "علی رضایی"))
+        self.assertTrue(matches_assignee_name("مهدی بخشنده، علی رضایی", "مهدی بخشنده"))
+        self.assertTrue(matches_assignee_name("سارا و مریم", "سارا"))
+        self.assertTrue(matches_assignee_name("سارا و مریم", "مریم"))
+        self.assertTrue(matches_assignee_name("بخشنده", "مهدی بخشنده"))
+        self.assertTrue(matches_assignee_name("مهدی بخشنده", "بخشنده"))
+
+        # Non-matches
+        self.assertFalse(matches_assignee_name("سارا احمدی", "رضا"))
+        self.assertFalse(matches_assignee_name("", "علی"))
+        self.assertFalse(matches_assignee_name("علی", ""))
+
+        # Keys normalization
+        k1 = task_match_key("تسک ۱", "علي رضايي", "1405/01/01")
+        k2 = task_match_key("تسک ۱ ", "علی رضایی ", "1405/01/01")
+        self.assertEqual(k1, k2)
+
+        s1 = task_soft_key("تسک ۱", "علي رضايي")
+        s2 = task_soft_key("تسک ۱ ", "علی رضایی ")
+        self.assertEqual(s1, s2)
+
     def test_personnel_sms_aliases(self) -> None:
         rec1 = {"نام": "محمد", "شماره تماس": "09123334444", "پیامک": "بله"}
         p1 = personnel_from_record(rec1, 10)
@@ -449,6 +506,43 @@ class ModelTests(unittest.TestCase):
         merged = overlay_status_from_personal(main, personal)
         self.assertEqual([task.status for task in merged], ["done", "in_progress"])
         self.assertEqual([task.row_index for task in merged], [2, 3])
+
+    def test_overlay_status_with_normalized_spelling(self) -> None:
+        main = [
+            Task(
+                sheet_name="Tasks",
+                row_index=2,
+                title="تسک آزمایشی",
+                project="عمومی",
+                assignee_name="علی رضایی",
+                created_by="مدیر",
+                created_at="1405/01/01",
+                due_date="1405/01/02",
+                priority="High",
+                status="pending",
+                description="",
+                sheet_gid=1,
+            )
+        ]
+        # In personal tab: Arabic yeh and trailing space
+        personal = [
+            Task(
+                sheet_name="علی رضایی",
+                row_index=5,
+                title="تسک آزمایشی ",
+                project="عمومی",
+                assignee_name="علي رضايي ",
+                created_by="مدیر",
+                created_at="1405/01/01",
+                due_date="1405/01/02",
+                priority="High",
+                status="done",
+                description="انجام شد",
+                sheet_gid=2,
+            )
+        ]
+        merged = overlay_status_from_personal(main, personal)
+        self.assertEqual(merged[0].status, "done")
 
     def test_paginate(self) -> None:
         items = list(range(10))

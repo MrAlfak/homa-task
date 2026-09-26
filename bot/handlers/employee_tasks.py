@@ -31,6 +31,7 @@ from services.auth import can_view_all_tasks, is_admin, is_senior_admin
 from services.sheets import Personnel, Task
 from services.sheets_async import SheetsAsync, authorize
 from services.sheets_models import (
+    matches_assignee_name,
     parse_due_as_jalali,
     resolve_shamsi_date_offset,
     tehran_today,
@@ -89,13 +90,13 @@ async def _require_team_viewer(telegram_id: int):
 
 async def _telegram_id_for_name(name: str) -> int | None:
     for person in await SheetsAsync.get_active_personnel():
-        if person.name == name:
+        if matches_assignee_name(name, person.name) or matches_assignee_name(person.name, name):
             return person.telegram_id
     return None
 
 
 async def _back_callback_for_task(viewer: Personnel, task: Task) -> str:
-    if can_view_all_tasks(viewer) and task.assignee_name != viewer.name:
+    if can_view_all_tasks(viewer) and not matches_assignee_name(task.assignee_name, viewer.name):
         assignee_tid = await _telegram_id_for_name(task.assignee_name)
         if assignee_tid is not None:
             return f"task:user:{assignee_tid}"
@@ -487,7 +488,7 @@ async def view_task(callback: CallbackQuery) -> None:
     show_assignee = can_view_all_tasks(auth.personnel)
     is_mgr = is_admin(auth.personnel) or is_senior_admin(auth.personnel)
     can_update = (
-        task.assignee_name == auth.personnel.name
+        matches_assignee_name(task.assignee_name, auth.personnel.name)
         or is_mgr
     )
     back_callback = await _back_callback_for_task(auth.personnel, task)
@@ -537,7 +538,7 @@ async def update_task_status(callback: CallbackQuery) -> None:
     show_assignee = can_view_all_tasks(auth.personnel)
     is_mgr = is_admin(auth.personnel) or is_senior_admin(auth.personnel)
     can_update = (
-        task.assignee_name == auth.personnel.name
+        matches_assignee_name(task.assignee_name, auth.personnel.name)
         or is_mgr
     )
     back_callback = await _back_callback_for_task(auth.personnel, task)
@@ -618,7 +619,7 @@ async def receive_task_note(message: Message, state: FSMContext) -> None:
     if task:
         show_assignee = can_view_all_tasks(auth.personnel)
         is_mgr = is_admin(auth.personnel) or is_senior_admin(auth.personnel)
-        can_update = task.assignee_name == auth.personnel.name or is_mgr
+        can_update = matches_assignee_name(task.assignee_name, auth.personnel.name) or is_mgr
         back_callback = await _back_callback_for_task(auth.personnel, task)
         await message.answer(
             format_task_detail(task, show_assignee=show_assignee),
@@ -702,7 +703,7 @@ async def set_task_due_date(callback: CallbackQuery, state: FSMContext) -> None:
     if task:
         show_assignee = can_view_all_tasks(auth.personnel)
         is_mgr = is_admin(auth.personnel) or is_senior_admin(auth.personnel)
-        can_update = task.assignee_name == auth.personnel.name or is_mgr
+        can_update = matches_assignee_name(task.assignee_name, auth.personnel.name) or is_mgr
         back_callback = await _back_callback_for_task(auth.personnel, task)
         await callback.message.edit_text(
             format_task_detail(task, show_assignee=show_assignee),
@@ -768,7 +769,7 @@ async def receive_edit_due_date_manual(message: Message, state: FSMContext) -> N
     if task:
         show_assignee = can_view_all_tasks(auth.personnel)
         is_mgr = is_admin(auth.personnel) or is_senior_admin(auth.personnel)
-        can_update = task.assignee_name == auth.personnel.name or is_mgr
+        can_update = matches_assignee_name(task.assignee_name, auth.personnel.name) or is_mgr
         back_callback = await _back_callback_for_task(auth.personnel, task)
         await message.answer(
             format_task_detail(task, show_assignee=show_assignee),
@@ -828,7 +829,7 @@ async def set_task_priority(callback: CallbackQuery) -> None:
     if task:
         show_assignee = can_view_all_tasks(auth.personnel)
         is_mgr = is_admin(auth.personnel) or is_senior_admin(auth.personnel)
-        can_update = task.assignee_name == auth.personnel.name or is_mgr
+        can_update = matches_assignee_name(task.assignee_name, auth.personnel.name) or is_mgr
         back_callback = await _back_callback_for_task(auth.personnel, task)
         await callback.message.edit_text(
             format_task_detail(task, show_assignee=show_assignee),

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from services.sheets_models import ContentEntry, FilmingEntry, Personnel
+from services.sheets_models import ContentEntry, FilmingEntry, Personnel, matches_assignee_name
 
 
 @dataclass(frozen=True)
@@ -102,7 +102,7 @@ def can_update_filming_entry(personnel: Personnel, entry: FilmingEntry) -> bool:
         return False
     if is_admin(personnel) or is_senior_admin(personnel):
         return True
-    return entry.assignee_name == personnel.name or entry.created_by == personnel.name
+    return matches_assignee_name(entry.assignee_name, personnel.name) or matches_assignee_name(entry.created_by, personnel.name)
 
 
 def can_update_content_entry(personnel: Personnel, entry: ContentEntry) -> bool:
@@ -111,4 +111,4 @@ def can_update_content_entry(personnel: Personnel, entry: ContentEntry) -> bool:
         return False
     if is_admin(personnel) or is_senior_admin(personnel):
         return True
-    return entry.name == personnel.name or entry.created_by == personnel.name
+    return matches_assignee_name(entry.name, personnel.name) or matches_assignee_name(entry.created_by, personnel.name)

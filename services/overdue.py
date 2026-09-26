@@ -18,6 +18,7 @@ from services.sheets import Personnel, Task
 from services.sheets_async import SheetsAsync
 from services.sheets_models import (
     TEHRAN_TZ,
+    matches_assignee_name,
     normalize_name,
     tehran_now,
     tehran_today,
@@ -148,6 +149,8 @@ async def run_overdue_pass(bot: Bot) -> None:
     for name, tasks in by_assignee.items():
         clean_name = normalize_name(name).lower()
         person = name_map.get(name.strip()) or name_map.get(clean_name)
+        if person is None:
+            person = next((p for p in name_map.values() if matches_assignee_name(name, p.name)), None)
         if person is None:
             logger.warning("Overdue notify skipped — unknown assignee %r", name)
             continue
