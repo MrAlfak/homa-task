@@ -169,17 +169,20 @@ class SheetsService:
                 f"Required worksheet tab {exc} not found in the spreadsheet."
             ) from exc
 
-        self.ensure_personnel_schema()
-        self.ensure_projects_schema()
-        self.ensure_tasks_status_column()
-        self.ensure_all_status_and_priority_dropdowns()
-        self.ensure_sheet_vazirmatn_font()
-        self.ensure_dropdown_right_align()
-        self.ensure_filming_schema()
-        self.ensure_content_schema()
-        self.ensure_content_report_schema()
-        self.ensure_sms_schema()
-        self.ensure_template_schema()
+        try:
+            self.ensure_personnel_schema()
+            self.ensure_projects_schema()
+            self.ensure_tasks_status_column()
+            self.ensure_filming_schema()
+            self.ensure_content_schema()
+            self.ensure_content_report_schema()
+            self.ensure_sms_schema()
+            self.ensure_template_schema()
+            self.ensure_all_status_and_priority_dropdowns()
+            self.ensure_sheet_vazirmatn_font()
+            self.ensure_dropdown_right_align()
+        except Exception as exc:
+            logger.warning("Optional schema setup encountered an issue during startup: %s", exc)
 
     def _get_or_rename_worksheet(
         self,
@@ -418,7 +421,11 @@ class SheetsService:
         """Apply unified dropdown data validation for اولویت and وضعیت across all sheets."""
         requests: list[dict] = []
         for worksheet in self._all_worksheets().values():
-            headers = [str(header).strip() for header in worksheet.row_values(1)]
+            try:
+                headers = [str(header).strip() for header in worksheet.row_values(1)]
+            except Exception as exc:
+                logger.debug("Could not read row_values on %s: %s", worksheet.title, exc)
+                continue
             if not headers:
                 continue
             end_row = max(int(worksheet.row_count or 0), 2000)
@@ -816,7 +823,18 @@ class SheetsService:
     def _find_append_row(self, worksheet: gspread.Worksheet) -> int:
         """Next row for a new task — always below existing data, never reclaims row 2+."""
         all_values = worksheet.get_all_values()
-        target = max(2, len(all_values) + 1)
+        if not all_values:
+            return 2
+
+        last_data_row = 1
+        for idx in range(len(all_values) - 1, 0, -1):
+            row = all_values[idx]
+            # Row has data if any cell has non-whitespace and isn't just an unchecked FALSE checkbox
+            if any(str(cell).strip() and str(cell).strip().upper() != "FALSE" for cell in row):
+                last_data_row = idx + 1
+                break
+
+        target = max(2, last_data_row + 1)
         # Some personal tabs keep a formula in A2; never overwrite it.
         if target <= 2 and self._row2_has_formula_template(worksheet):
             return 3
@@ -891,6 +909,12 @@ class SheetsService:
             if append_only
             else self._find_writable_row(worksheet, col_count)
         )
+        if target_row > worksheet.row_count:
+            rows_to_add = max(50, target_row - worksheet.row_count + 10)
+            worksheet.add_rows(rows_to_add)
+        if col_count > worksheet.col_count:
+            worksheet.add_cols(col_count - worksheet.col_count)
+
         start = gspread.utils.rowcol_to_a1(target_row, 1)
         end = gspread.utils.rowcol_to_a1(target_row, col_count)
         worksheet.update(
@@ -1146,12 +1170,12 @@ class SheetsService:
             worksheet.append_row(FILMING_HEADERS, value_input_option="USER_ENTERED")
             logger.info("Created worksheet %s", FILMING_SHEET_NAME)
             self.invalidate_worksheet_cache()
-        self._ensure_project_column_dropdown(
-            worksheet,
-            header_aliases=FILMING_PROJECT_HEADER_ALIASES,
-            log_label="Meetings",
-        )
-        return worksheet
+            self._ensure_project_column_dropdown(
+                worksheet,
+                header_aliases=FILMING_PROJECT_HEADER_ALIASES,
+                log_label="Meetings",
+            )
+            return worksheet
 
         headers = [h.strip() for h in worksheet.row_values(1)]
         if not headers:
@@ -1203,20 +1227,34 @@ class SheetsService:
     ) -> FilmingEntry | None:
         record = self._row_to_dict(headers, row)
         project = str(record.get("نام پروژه", "")).strip()
+        if not project and "نام پروژه" not in headers:
+            project = str(record.get("پروژه", "")).strip()
         if not project:
             return None
+        location = str(
+            record.get("محل فیلم برداری") or record.get("مکان") or ""
+        ).strip()
+        day = str(record.get("روز", "")).strip()
+        hour = str(record.get("ساعت", "")).strip()
+        date_str = str(
+            record.get("تاریخ") or record.get("تاریخ جلسه ") or record.get("تاریخ جلسه") or ""
+        ).strip().lstrip("'")
+        assignee_name = str(
+            record.get("مسوول") or record.get("مسئول") or record.get("برگزار کننده") or ""
+        ).strip()
+        status_str = str(record.get("وضعیت", "")).strip()
+        created_by = str(record.get("ایجاد کننده", "")).strip()
+
         return FilmingEntry(
             row_index=row_index,
             project=project,
-            location=str(record.get("محل فیلم برداری", "")).strip(),
-            day=str(record.get("روز", "")).strip(),
-            hour=str(record.get("ساعت", "")).strip(),
-            date=str(record.get("تاریخ", "")).strip().lstrip("'"),
-            assignee_name=str(
-                record.get("مسوول") or record.get("مسئول") or ""
-            ).strip(),
-            status=self._normalize_status(str(record.get("وضعیت", "")).strip()),
-            created_by=str(record.get("ایجاد کننده", "")).strip(),
+            location=location,
+            day=day,
+            hour=hour,
+            date=date_str,
+            assignee_name=assignee_name,
+            status=self._normalize_status(status_str) if status_str else "pending",
+            created_by=created_by,
         )
 
     def create_filming_entry(
@@ -1231,16 +1269,46 @@ class SheetsService:
         created_by_name: str,
     ) -> FilmingEntry:
         worksheet = self._filming_worksheet()
-        row = [
-            project.strip(),
-            location.strip(),
-            day.strip(),
-            hour.strip(),
-            self._date_for_sheet(date.strip()),
-            assignee.name,
-            "در انتظار",
-            created_by_name,
-        ]
+        headers = [str(h).strip() for h in worksheet.row_values(1)]
+        entry_date = self._date_for_sheet(date.strip())
+        values_by_header: dict[str, str] = {
+            "نام پروژه": project.strip(),
+            "پروژه": project.strip(),
+            "محل فیلم برداری": location.strip(),
+            "مکان": location.strip(),
+            "روز": day.strip(),
+            "ساعت": hour.strip(),
+            "تاریخ": entry_date,
+            "تاریخ جلسه": entry_date,
+            "تاریخ جلسه ": entry_date,
+            "مسوول": assignee.name,
+            "مسئول": assignee.name,
+            "وضعیت": "در انتظار",
+            "ایجاد کننده": created_by_name,
+        }
+        try:
+            parts = [int(p) for p in date.strip().replace("-", "/").split("/") if p.isdigit()]
+            if len(parts) >= 2 and 1 <= parts[1] <= 12:
+                from services.sheets_models import PERSIAN_MONTHS
+                month_name = PERSIAN_MONTHS[parts[1] - 1] + " "
+                values_by_header["ماه"] = month_name
+                values_by_header["ماه "] = month_name
+        except Exception:
+            pass
+
+        if headers and ("نام پروژه" in headers or "پروژه" in headers):
+            row = [values_by_header.get(h.strip(), "") for h in headers]
+        else:
+            row = [
+                project.strip(),
+                location.strip(),
+                day.strip(),
+                hour.strip(),
+                entry_date,
+                assignee.name,
+                "در انتظار",
+                created_by_name,
+            ]
         row_index = self._insert_formatted_row(worksheet, row, append_only=True)
         return FilmingEntry(
             row_index=row_index,
@@ -1296,8 +1364,9 @@ class SheetsService:
             return False
         worksheet = self._filming_worksheet()
         headers = worksheet.row_values(1)
+        stripped = [str(h).strip() for h in headers]
         try:
-            status_col = headers.index("وضعیت") + 1
+            status_col = stripped.index("وضعیت") + 1
         except ValueError:
             return False
         worksheet.update_cell(entry.row_index, status_col, self._status_to_sheet(status))

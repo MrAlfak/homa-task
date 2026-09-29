@@ -1025,5 +1025,161 @@ class KeyboardsAndUXFeaturesTests(unittest.TestCase):
         self.assertIsNone(parse_due_as_jalali("not-a-date"))
 
 
+class FilmingAndAppendRowTests(unittest.TestCase):
+    def test_find_append_row_ignores_trailing_empty_and_checkbox_rows(self) -> None:
+        from unittest.mock import MagicMock
+        from services.sheets import SheetsService
+
+        svc = SheetsService.__new__(SheetsService)
+        svc._row2_has_formula_template = MagicMock(return_value=False)
+
+        ws = MagicMock()
+        # Row 1 is header, Rows 2-26 are real data, Rows 27-1001 are empty with FALSE in col 8
+        header = ["پروژه", "تلفن", "تاریخ", "ساعت", "مکان", "ماه", "برگزارکننده", "برگزاری"]
+        data_rows = [["پروژه " + str(i), "0912", "1403/04/01", "10:00", "تهران", "تیر", "احمدی", "TRUE"] for i in range(25)]
+        empty_rows = [["", "", "", "", "", "", "", "FALSE"] for _ in range(100)]
+        ws.get_all_values.return_value = [header] + data_rows + empty_rows
+
+        target = svc._find_append_row(ws)
+        # Should return row 27 (25 data rows + 1 header = 26, next row is 27)
+        self.assertEqual(target, 27)
+
+    def test_find_append_row_empty_sheet_returns_row_2(self) -> None:
+        from unittest.mock import MagicMock
+        from services.sheets import SheetsService
+
+        svc = SheetsService.__new__(SheetsService)
+        svc._row2_has_formula_template = MagicMock(return_value=False)
+
+        ws = MagicMock()
+        ws.get_all_values.return_value = [["تسک", "پروژه", "مسوول"]]
+        self.assertEqual(svc._find_append_row(ws), 2)
+
+    def test_find_append_row_empty_sheet_with_row2_formula_returns_row_3(self) -> None:
+        from unittest.mock import MagicMock
+        from services.sheets import SheetsService
+
+        svc = SheetsService.__new__(SheetsService)
+        svc._row2_has_formula_template = MagicMock(return_value=True)
+
+        ws = MagicMock()
+        ws.get_all_values.return_value = [["تسک", "پروژه", "مسوول"]]
+        self.assertEqual(svc._find_append_row(ws), 3)
+
+    def test_insert_formatted_row_auto_expands_grid(self) -> None:
+        from unittest.mock import MagicMock
+        from services.sheets import SheetsService
+
+        svc = SheetsService.__new__(SheetsService)
+        svc._personal_sheet_uses_tasks_filter = MagicMock(return_value=False)
+        svc._find_append_row = MagicMock(return_value=1050)
+        svc._copy_row_format = MagicMock()
+
+        ws = MagicMock()
+        ws.row_count = 1000
+        ws.col_count = 10
+        row = ["a"] * 15
+
+        target = svc._insert_formatted_row(ws, row, append_only=True)
+        self.assertEqual(target, 1050)
+        ws.add_rows.assert_called_once()
+        ws.add_cols.assert_called_once_with(5)  # 15 - 10 = 5 cols added
+        ws.update.assert_called_once()
+
+    def test_parse_filming_row_skips_old_meetings_and_parses_filming(self) -> None:
+        from services.sheets import SheetsService
+
+        svc = SheetsService.__new__(SheetsService)
+        headers = [
+            'پروژه', 'شماره تلفن', 'تاریخ جلسه ', 'ساعت', 'مکان', 'ماه', 'برگزار کننده', 'برگزاری',
+            'توضیحات', 'طول جلسه', 'نام پروژه', 'محل فیلم برداری', 'روز', 'تاریخ', 'مسوول', 'وضعیت', 'ایجاد کننده'
+        ]
+
+        # Old meeting row: "نام پروژه" (index 10) is empty
+        old_meeting_row = ['پروژه الف', '09121234567', '1403/04/10', '10:00', 'دفتر', 'تیر', 'مدیر', 'TRUE', '', '']
+        entry_old = svc._parse_filming_row(headers=headers, row=old_meeting_row, row_index=5)
+        self.assertIsNone(entry_old)
+
+        # New filming row: "نام پروژه" is present
+        filming_row = [
+            'پروژه فیلم', '', '1403/07/15', '14:00', 'لوکیشن زعفرانیه', 'مهر', '', '', '', '',
+            'پروژه فیلم', 'لوکیشن زعفرانیه', 'دوشنبه', '1403/07/15', 'دهقانیان', 'در انتظار', 'احسان'
+        ]
+        entry = svc._parse_filming_row(headers=headers, row=filming_row, row_index=27)
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry.project, "پروژه فیلم")
+        self.assertEqual(entry.location, "لوکیشن زعفرانیه")
+        self.assertEqual(entry.day, "دوشنبه")
+        self.assertEqual(entry.hour, "14:00")
+        self.assertEqual(entry.date, "1403/07/15")
+        self.assertEqual(entry.assignee_name, "دهقانیان")
+        self.assertEqual(entry.status, "pending")
+        self.assertEqual(entry.created_by, "احسان")
+
+    def test_parse_filming_row_fallback_when_only_project_header(self) -> None:
+        from services.sheets import SheetsService
+
+        svc = SheetsService.__new__(SheetsService)
+        headers = ['پروژه', 'مکان', 'روز', 'ساعت', 'تاریخ', 'مسئول', 'وضعیت', 'ایجاد کننده']
+        row = ['پروژه بتا', 'کارخانه', 'یکشنبه', '11:00', '1403/08/01', 'حسینی', 'در حال انجام', 'مدیر']
+        entry = svc._parse_filming_row(headers=headers, row=row, row_index=3)
+        self.assertIsNotNone(entry)
+        self.assertEqual(entry.project, "پروژه بتا")
+        self.assertEqual(entry.location, "کارخانه")
+        self.assertEqual(entry.assignee_name, "حسینی")
+        self.assertEqual(entry.status, "in_progress")
+
+    def test_create_filming_entry_row_alignment(self) -> None:
+        from unittest.mock import MagicMock
+        from services.sheets import SheetsService
+        from services.sheets_models import Personnel
+
+        svc = SheetsService.__new__(SheetsService)
+        ws = MagicMock()
+        headers = [
+            'پروژه', 'شماره تلفن', 'تاریخ جلسه ', 'ساعت', 'مکان', 'ماه', 'برگزار کننده', 'برگزاری',
+            'توضیحات', 'طول جلسه', 'نام پروژه', 'محل فیلم برداری', 'روز', 'تاریخ', 'مسوول', 'وضعیت', 'ایجاد کننده'
+        ]
+        ws.row_values.return_value = headers
+        svc._filming_worksheet = MagicMock(return_value=ws)
+        inserted_rows = []
+        svc._insert_formatted_row = MagicMock(side_effect=lambda w, r, append_only: (inserted_rows.append(r), 27)[1])
+
+        assignee = Personnel(telegram_id=123, name="دهقانیان", role="employee", active=True)
+        entry = svc.create_filming_entry(
+            project="پروژه تست",
+            location="دفتر مرکزی",
+            day="چهارشنبه",
+            hour="16:30",
+            date="1403/07/20",
+            assignee=assignee,
+            created_by_name="مدیر",
+        )
+        self.assertEqual(entry.row_index, 27)
+        self.assertEqual(len(inserted_rows), 1)
+        row = inserted_rows[0]
+        self.assertEqual(len(row), len(headers))
+        # Col 0 (پروژه): پروژه تست
+        self.assertEqual(row[0], "پروژه تست")
+        # Col 3 (ساعت): 16:30
+        self.assertEqual(row[3], "16:30")
+        # Col 4 (مکان): دفتر مرکزی
+        self.assertEqual(row[4], "دفتر مرکزی")
+        # Col 10 (نام پروژه): پروژه تست
+        self.assertEqual(row[10], "پروژه تست")
+        # Col 11 (محل فیلم برداری): دفتر مرکزی
+        self.assertEqual(row[11], "دفتر مرکزی")
+        # Col 12 (روز): چهارشنبه
+        self.assertEqual(row[12], "چهارشنبه")
+        # Col 13 (تاریخ): '1403/07/20
+        self.assertEqual(row[13], "'1403/07/20")
+        # Col 14 (مسوول): دهقانیان
+        self.assertEqual(row[14], "دهقانیان")
+        # Col 15 (وضعیت): در انتظار
+        self.assertEqual(row[15], "در انتظار")
+        # Col 16 (ایجاد کننده): مدیر
+        self.assertEqual(row[16], "مدیر")
+
+
 if __name__ == "__main__":
     unittest.main()
