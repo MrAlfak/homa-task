@@ -21,6 +21,7 @@ from bot.keyboards import (
     is_done_tasks_text,
     is_my_tasks_text,
     is_team_tasks_text,
+    main_menu_keyboard,
     task_detail_keyboard,
     task_list_keyboard,
     team_users_keyboard,
@@ -34,6 +35,7 @@ from services.sheets_models import (
     matches_assignee_name,
     parse_due_as_jalali,
     resolve_shamsi_date_offset,
+    status_to_sheet,
     tehran_today,
     validate_shamsi_date,
 )
@@ -117,7 +119,7 @@ async def _show_team_user_picker(message: Message, *, edit: bool = False) -> Non
     if viewer is None:
         text = (
             "دسترسی مشاهده تسک‌های دیگران برای شما فعال نیست.\n"
-            "در Personnel هر دو ستون «مدیر ارشد» و «مشاهده همه تسک» باید TRUE باشند."
+            "در Personnel ستون «تسک های افراد» باید TRUE باشد."
         )
         if auth.allowed:
             await message.answer(text)
@@ -263,7 +265,7 @@ async def callback_team_users(callback: CallbackQuery) -> None:
 
     employees = await SheetsAsync.get_active_employees()
     await callback.message.edit_text(
-        "👥 <b>تسک‌های گروه</b>\n\nیک نفر را انتخاب کنید:",
+        "👥 <b>تسک های افراد</b>\n\nیک نفر را انتخاب کنید:",
         reply_markup=team_users_keyboard(employees),
         parse_mode="HTML",
     )
@@ -431,6 +433,11 @@ async def quick_done_task(callback: CallbackQuery) -> None:
         f"📌 تسک‌های شما ({len(tasks)} مورد):",
         reply_markup=task_list_keyboard(tasks),
     )
+    open_count = len(tasks)
+    await callback.message.answer(
+        f"✅ تسک «{task.title}» انجام شد.",
+        reply_markup=main_menu_keyboard(auth.personnel, open_tasks_count=open_count),
+    )
 
 
 @router.callback_query(F.data.startswith("taskfilter:"))
@@ -457,7 +464,7 @@ async def callback_task_filter(callback: CallbackQuery) -> None:
         today_str = resolve_shamsi_date_offset(0) or ""
         filtered = [t for t in tasks if t.due_date and t.due_date.strip() == today_str]
     elif filter_mode == "high":
-        filtered = [t for t in tasks if (t.priority or "").lower() == "high"]
+        filtered = [t for t in tasks if (t.priority or "").lower() in ("high", "بالا", "فوری")]
     else:
         filter_mode = "all"
         filtered = tasks
@@ -552,6 +559,13 @@ async def update_task_status(callback: CallbackQuery) -> None:
         ),
         parse_mode="HTML",
     )
+
+    if matches_assignee_name(task.assignee_name, auth.personnel.name) or not is_mgr:
+        open_count = await SheetsAsync.get_open_tasks_count(auth.personnel)
+        await callback.message.answer(
+            f"✅ وضعیت تسک «{task.title}» به «{status_to_sheet(new_status)}» تغییر یافت.",
+            reply_markup=main_menu_keyboard(auth.personnel, open_tasks_count=open_count),
+        )
 
 
 @router.callback_query(F.data.startswith("task:note:"))

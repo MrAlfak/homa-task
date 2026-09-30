@@ -37,17 +37,24 @@ from services.sheets_models import (
     PERSONNEL_EXTRA_COLUMNS,
     PERSONNEL_MOBILE_HEADER_ALIASES,
     PRIORITIES,
+    PRIORITIES_PERSIAN,
+    normalize_priority,
     PROJECTS_CACHE_TTL_SEC,
     PROJECTS_HEADER_ALIASES,
     PROJECTS_SHEET_HEADER,
     SCOPES,
+    SHEET_VALUES_CACHE_TTL_SEC,
     SMS_LOG_HEADERS,
     SMS_LOG_SHEET_NAME,
     SMS_SETTINGS_CACHE_TTL_SEC,
     SMS_SETTINGS_DEFAULT_ROWS,
     SMS_SETTINGS_HEADERS,
     SMS_SHEET_NAME,
+    STATUS_CANCELLED,
+    STATUS_DONE,
     STATUS_HEADER,
+    STATUS_IN_PROGRESS,
+    STATUS_OPEN,
     STATUS_SHEET_VALUES,
     SYSTEM_TAB_ORDER,
     TASKS_HEADERS,
@@ -98,10 +105,12 @@ from services.sheets_models import (
     sort_projects,
     status_to_sheet,
     task_match_key,
+    task_soft_key,
     tehran_now,
     tehran_today,
     template_from_record,
     today_jalali_str,
+    to_persian_display_name,
     validate_shamsi_date,
 )
 
@@ -150,6 +159,7 @@ class SheetsService:
         client = gspread.authorize(credentials)
         self._spreadsheet = client.open_by_key(config.google_sheet_id)
         self._worksheet_cache: tuple[float, dict[str, gspread.Worksheet]] | None = None
+        self._sheet_values_cache: dict[int, tuple[float, list[list[str]]]] = {}
         self._personnel_records_cache: tuple[float, list[dict[str, str]]] | None = None
         self._projects_cache: tuple[float, list[str]] | None = None
         self._sms_settings_cache: tuple[float, SmsSettings] | None = None
@@ -159,7 +169,7 @@ class SheetsService:
 
         worksheets = self._all_worksheets(force_refresh=True)
         self.ensure_english_sheet_titles()
-        worksheets = self._all_worksheets(force_refresh=True)
+        worksheets = self._all_worksheets()
         try:
             self._personnel_ws = worksheets["Personnel"]
             self._tasks_ws = worksheets["Tasks"]
@@ -178,9 +188,10 @@ class SheetsService:
             self.ensure_content_report_schema()
             self.ensure_sms_schema()
             self.ensure_template_schema()
-            self.ensure_all_status_and_priority_dropdowns()
-            self.ensure_sheet_vazirmatn_font()
-            self.ensure_dropdown_right_align()
+            if os.getenv("HOMA_RUN_SHEET_MIGRATIONS", "").strip() in ("1", "true", "yes"):
+                self.ensure_all_status_and_priority_dropdowns()
+                self.ensure_sheet_vazirmatn_font()
+                self.ensure_dropdown_right_align()
         except Exception as exc:
             logger.warning("Optional schema setup encountered an issue during startup: %s", exc)
 
@@ -225,7 +236,7 @@ class SheetsService:
         for preferred, aliases in pairs:
             self._get_or_rename_worksheet(preferred, aliases)
 
-        worksheets = self._all_worksheets(force_refresh=True)
+        worksheets = self._all_worksheets()
         ordered: list[gspread.Worksheet] = []
         used: set[int] = set()
         for title in SYSTEM_TAB_ORDER:
@@ -234,11 +245,12 @@ class SheetsService:
                 continue
             ordered.append(worksheet)
             used.add(worksheet.id)
-        for worksheet in self._spreadsheet.worksheets():
+        all_ws = list(worksheets.values())
+        for worksheet in all_ws:
             if worksheet.id not in used:
                 ordered.append(worksheet)
                 used.add(worksheet.id)
-        current = [ws.id for ws in self._spreadsheet.worksheets()]
+        current = [ws.id for ws in all_ws]
         desired = [ws.id for ws in ordered]
         if current == desired:
             return
@@ -279,6 +291,7 @@ class SheetsService:
         """Drop cached worksheet list (e.g. after creating a new tab)."""
         self._worksheet_cache = None
         self._filter_formula_cache.clear()
+        self.invalidate_sheet_values()
 
     def invalidate_personnel_cache(self) -> None:
         """Drop cached Personnel rows (e.g. after admin edits the sheet)."""
@@ -287,6 +300,51 @@ class SheetsService:
     def invalidate_projects_cache(self) -> None:
         """Drop cached Projects list (e.g. after adding a new category)."""
         self._projects_cache = None
+
+    def _get_sheet_values(
+        self,
+        worksheet: gspread.Worksheet,
+        *,
+        max_age: float = SHEET_VALUES_CACHE_TTL_SEC,
+        force: bool = False,
+    ) -> list[list[str]]:
+        """Cache all cell values per worksheet to prevent 429 quota exhaustion."""
+        now = time.monotonic()
+        sheet_id = int(getattr(worksheet, "id", 0) or 0)
+        cache = getattr(self, "_sheet_values_cache", None)
+        if cache is None:
+            self._sheet_values_cache = {}
+            cache = self._sheet_values_cache
+        if not force and sheet_id in cache:
+            cached_at, values = cache[sheet_id]
+            if now - cached_at < max_age:
+                return values
+        values = worksheet.get_all_values()
+        cache[sheet_id] = (now, values)
+        return values
+
+    def _get_sheet_headers(self, worksheet: gspread.Worksheet) -> list[str]:
+        """Header row for a worksheet, reading from in-memory cache if available."""
+        values = self._get_sheet_values(worksheet)
+        if values:
+            return [str(h).strip() for h in values[0]]
+        return [str(h).strip() for h in worksheet.row_values(1)]
+
+    def invalidate_sheet_values(
+        self, worksheet: gspread.Worksheet | int | None = None
+    ) -> None:
+        """Invalidate cached cell values for a worksheet or all worksheets."""
+        cache = getattr(self, "_sheet_values_cache", None)
+        if cache is None:
+            return
+        if worksheet is None:
+            cache.clear()
+        else:
+            if hasattr(worksheet, "id"):
+                sheet_id = int(getattr(worksheet, "id", 0) or 0)
+            else:
+                sheet_id = int(worksheet)
+            cache.pop(sheet_id, None)
 
     def _get_personnel_records(self) -> list[dict[str, str]]:
         """Cached Personnel rows to avoid full-sheet reads on every message."""
@@ -447,7 +505,7 @@ class SheetsService:
                                         "type": "ONE_OF_LIST",
                                         "values": [
                                             {"userEnteredValue": item}
-                                            for item in PRIORITIES
+                                            for item in PRIORITIES_PERSIAN
                                         ],
                                     },
                                     "showCustomUi": True,
@@ -765,6 +823,7 @@ class SheetsService:
     _role_label = staticmethod(role_label)
     _parse_due_as_jalali = staticmethod(parse_due_as_jalali)
     _task_match_key = staticmethod(task_match_key)
+    _task_soft_key = staticmethod(task_soft_key)
 
     def _row_is_writable(self, row: list[str], col_count: int) -> bool:
         """A row can be reused when it has no real task in the first column."""
@@ -1032,7 +1091,7 @@ class SheetsService:
         dropdowns: list[tuple[str, tuple[str, ...]]] = [
             ("فعال", ("TRUE", "FALSE")),
             ("تکرارشوندگی", TEMPLATE_RECURRENCE_VALUES),
-            ("اولویت", PRIORITIES),
+            ("اولویت", PRIORITIES_PERSIAN),
         ]
         for header, options in dropdowns:
             if header not in headers:
@@ -1559,31 +1618,43 @@ class SheetsService:
         return self.ensure_content_schema()
 
     def get_design_names(self) -> list[str]:
-        """People names for Design picker (sheet column نام, else defaults)."""
+        """People names for Design picker (configured via Personnel 'تولید محتوا' flag)."""
+        active = self.get_all_active_personnel()
+        flagged_employees = [p for p in active if p.content_access and p.role == "employee"]
+        if not flagged_employees:
+            flagged_employees = [p for p in active if p.content_access]
+
+        if flagged_employees:
+            names: list[str] = []
+            seen: set[str] = set()
+            for p in flagged_employees:
+                display = to_persian_display_name(p.name)
+                if display not in seen:
+                    seen.add(display)
+                    names.append(display)
+            return names
+
         worksheet = self._content_worksheet()
         headers = [h.strip() for h in worksheet.row_values(1)]
-        if "نام" not in headers:
-            return list(CONTENT_DESIGN_NAMES)
-        name_col = headers.index("نام") + 1
-        values = worksheet.col_values(name_col)[1:]
-        names: list[str] = []
-        seen: set[str] = set()
-        for raw in values:
-            name = str(raw).strip()
-            if not name or name in seen:
-                continue
-            seen.add(name)
-            names.append(name)
-        if names:
-            return names
-        flagged = [p.name for p in self.get_active_personnel() if p.content_access]
-        seen_flagged: set[str] = set()
-        unique_flagged: list[str] = []
-        for name in flagged:
-            if name and name not in seen_flagged:
-                seen_flagged.add(name)
-                unique_flagged.append(name)
-        return unique_flagged or list(CONTENT_DESIGN_NAMES)
+        if "نام" in headers:
+            name_col = headers.index("نام") + 1
+            values = worksheet.col_values(name_col)[1:]
+            active_names = {p.name.strip().lower() for p in active}
+            active_persian = {to_persian_display_name(p.name).strip().lower() for p in active}
+            names = []
+            seen = set()
+            for raw in values:
+                val = str(raw).strip()
+                norm = normalize_name(val).lower()
+                if not val or val in seen:
+                    continue
+                if norm in active_names or norm in active_persian:
+                    seen.add(val)
+                    names.append(val)
+            if names:
+                return names
+
+        return list(CONTENT_DESIGN_NAMES)
 
     @staticmethod
     def _content_project_from_record(record: dict[str, str]) -> str:
@@ -2030,7 +2101,7 @@ class SheetsService:
         due_date: str = "",
     ) -> Task:
         created_at, month = self._shamsi_today()
-        priority = priority if priority in PRIORITIES else "Medium"
+        priority = normalize_priority(priority)
         # Default deadline to today when the caller does not supply one.
         effective_due = due_date.strip() or created_at
 
@@ -2047,6 +2118,7 @@ class SheetsService:
         ]
         main_row_index = self._insert_formatted_row(self._tasks_ws, main_row)
         self._personal_tasks_cache = None
+        self.invalidate_sheet_values(self._tasks_ws)
 
         personal_ws = self._personal_worksheet(assignee.name)
         uses_filter_mirror = (
@@ -2073,6 +2145,7 @@ class SheetsService:
                 personal_row,
                 append_only=True,
             )
+            self.invalidate_sheet_values(personal_ws)
 
         task_sheet = "Tasks" if uses_filter_mirror or personal_ws is None else assignee.name
         task_row = main_row_index if uses_filter_mirror or personal_ws is None else personal_row_index
@@ -2107,18 +2180,39 @@ class SheetsService:
         sheet_gid: int = 0,
     ) -> Task | None:
         record = self._row_to_dict(headers, row)
-        title = str(record.get("تسک", "")).strip()
-        if not title:
+        title = str(
+            record.get(
+                "تسک",
+                record.get(
+                    "عنوان",
+                    record.get("title", record.get("نام تسک", "")),
+                ),
+            )
+        ).strip()
+        is_personal = sheet_name != "Tasks"
+        if not title and is_personal and row and row[0].strip():
+            candidate_title = row[0].strip()
+            if candidate_title not in {"تسک", "پروژه", "مسوول تسک", "مسئول تسک", "وضعیت"} and not candidate_title.startswith("#"):
+                title = candidate_title
+
+        if not title or title.startswith("#"):
             return None
+
         assignee = str(
             record.get(
                 "مسوول تسک",
                 record.get("مسئول تسک", record.get("i", "")),
             )
         ).strip()
-        if not assignee and sheet_name != "Tasks":
+        if not assignee and is_personal:
             assignee = sheet_name.strip()
-        status_raw = str(record.get("وضعیت", "")).strip()
+
+        status_raw = str(record.get("وضعیت", record.get("status", ""))).strip()
+        if not status_raw and is_personal and len(row) > 7 and row[7].strip():
+            cand = row[7].strip()
+            if cand in STATUS_DONE or cand in STATUS_IN_PROGRESS or cand in STATUS_CANCELLED or cand in STATUS_OPEN:
+                status_raw = cand
+
         return Task(
             sheet_name=sheet_name,
             row_index=row_index,
@@ -2128,7 +2222,7 @@ class SheetsService:
             created_by=str(record.get("ایجاد کننده", "")).strip(),
             created_at=str(record.get("تاریخ ایجاد", "")).strip(),
             due_date=str(record.get("ددلاین", "")).strip(),
-            priority=str(record.get("اولویت", "")).strip(),
+            priority=normalize_priority(str(record.get("اولویت", "")).strip()),
             status=self._normalize_status(status_raw),
             description=str(record.get("توضیحات", "")).strip(),
             sheet_gid=sheet_gid,
@@ -2145,7 +2239,7 @@ class SheetsService:
 
     def list_main_tasks(self) -> list[Task]:
         """All rows from the Tasks tab, including done/cancelled (for reports)."""
-        all_values = self._tasks_ws.get_all_values()
+        all_values = self._get_sheet_values(self._tasks_ws)
         if len(all_values) <= 1:
             return []
         headers = all_values[0]
@@ -2182,9 +2276,7 @@ class SheetsService:
                 return rows
         collected: list[Task] = []
         for worksheet in self._personal_worksheets():
-            if self._personal_sheet_uses_tasks_filter(worksheet):
-                continue
-            all_values = worksheet.get_all_values()
+            all_values = self._get_sheet_values(worksheet)
             time.sleep(0.08)  # Gentle pacing to avoid burst rate-limiting
             if len(all_values) <= 1:
                 continue
@@ -2208,7 +2300,7 @@ class SheetsService:
         if not getattr(self, "_tasks_status_col_verified", False):
             self.ensure_tasks_status_column()
             self._tasks_status_col_verified = True
-        all_values = self._tasks_ws.get_all_values()
+        all_values = self._get_sheet_values(self._tasks_ws)
         if len(all_values) <= 1:
             return {"updated": 0, "scanned": 0, "tabs": 0}
         headers = [str(header).strip() for header in all_values[0]]
@@ -2249,6 +2341,8 @@ class SheetsService:
         for start in range(0, len(updates), chunk_size):
             chunk = updates[start : start + chunk_size]
             self._tasks_ws.batch_update(chunk, value_input_option="USER_ENTERED")
+        if updates:
+            self.invalidate_sheet_values(self._tasks_ws)
 
         logger.info(
             "Tasks status synced from personal tabs: updated=%s scanned=%s tabs=%s",
@@ -2276,36 +2370,45 @@ class SheetsService:
             "Tasks",
             TASKS_HEADERS,
             personnel.name,
-            status,
+            status="ALL",
         )
 
         personal_ws = self._personal_worksheet(personnel.name)
-        if personal_ws is None or self._personal_sheet_uses_tasks_filter(personal_ws):
-            return tasks_from_main
+        if personal_ws is not None:
+            personal_tasks = self._get_tasks_from_sheet(
+                personal_ws,
+                personal_ws.title,
+                PERSONAL_HEADERS,
+                personnel.name,
+                status="ALL",
+            )
+            if personal_tasks:
+                if not tasks_from_main:
+                    all_tasks = personal_tasks
+                else:
+                    merged = overlay_status_from_personal(tasks_from_main, personal_tasks)
+                    seen_keys = {
+                        self._task_match_key(t.title, t.assignee_name, t.due_date) for t in merged
+                    }
+                    seen_soft = {
+                        self._task_soft_key(t.title, t.assignee_name) for t in merged
+                    }
+                    for pt in personal_tasks:
+                        key = self._task_match_key(pt.title, pt.assignee_name, pt.due_date)
+                        soft = self._task_soft_key(pt.title, pt.assignee_name)
+                        if key not in seen_keys and soft not in seen_soft:
+                            seen_keys.add(key)
+                            seen_soft.add(soft)
+                            merged.append(pt)
+                    all_tasks = merged
+            else:
+                all_tasks = tasks_from_main
+        else:
+            all_tasks = tasks_from_main
 
-        personal_tasks = self._get_tasks_from_sheet(
-            personal_ws,
-            personal_ws.title,
-            PERSONAL_HEADERS,
-            personnel.name,
-            status,
-        )
-
-        if not personal_tasks:
-            return tasks_from_main
-        if not tasks_from_main:
-            return personal_tasks
-
-        merged = overlay_status_from_personal(tasks_from_main, personal_tasks)
-        seen_keys = {
-            self._task_match_key(t.title, t.assignee_name, t.due_date) for t in merged
-        }
-        for pt in personal_tasks:
-            key = self._task_match_key(pt.title, pt.assignee_name, pt.due_date)
-            if key not in seen_keys:
-                seen_keys.add(key)
-                merged.append(pt)
-        return merged
+        if status is None:
+            return [t for t in all_tasks if t.status not in {"done", "cancelled"}]
+        return [t for t in all_tasks if t.status == status]
 
     def _get_tasks_from_sheet(
         self,
@@ -2315,7 +2418,7 @@ class SheetsService:
         assignee_name: str,
         status: str | None,
     ) -> list[Task]:
-        all_values = worksheet.get_all_values()
+        all_values = self._get_sheet_values(worksheet)
         if len(all_values) <= 1:
             return []
 
@@ -2332,11 +2435,14 @@ class SheetsService:
             )
             if task is None:
                 continue
-            if is_personal and not task.assignee_name:
-                task = replace(task, assignee_name=assignee_name)
-            if not matches_assignee_name(task.assignee_name, assignee_name):
+            if is_personal:
+                if not task.assignee_name:
+                    task = replace(task, assignee_name=assignee_name)
+            elif not matches_assignee_name(task.assignee_name, assignee_name):
                 continue
-            if status is None:
+            if status == "ALL":
+                pass
+            elif status is None:
                 if task.status in {"done", "cancelled"}:
                     continue
             elif task.status != status:
@@ -2360,7 +2466,7 @@ class SheetsService:
         *,
         create_column: bool = False,
     ) -> bool:
-        headers = [str(h).strip() for h in worksheet.row_values(1)]
+        headers = self._get_sheet_headers(worksheet)
         try:
             status_col = headers.index(STATUS_HEADER) + 1
         except ValueError:
@@ -2371,6 +2477,7 @@ class SheetsService:
                 worksheet.add_cols(status_col - worksheet.col_count)
             worksheet.update_cell(1, status_col, STATUS_HEADER)
         worksheet.update_cell(row_index, status_col, self._status_to_sheet(status))
+        self.invalidate_sheet_values(worksheet)
         return True
 
     def _tasks_row_for(self, task: Task) -> int | None:
@@ -2378,11 +2485,13 @@ class SheetsService:
             task.sheet_gid and int(task.sheet_gid) == int(self._tasks_ws.id)
         ):
             return task.row_index
-        all_values = self._tasks_ws.get_all_values()
+        all_values = self._get_sheet_values(self._tasks_ws)
         if len(all_values) <= 1:
             return None
         headers = all_values[0] or TASKS_HEADERS
         want = self._task_match_key(task.title, task.assignee_name, task.due_date)
+        want_soft = self._task_soft_key(task.title, task.assignee_name)
+        soft_match_idx = None
         for index, row in enumerate(all_values[1:], start=2):
             parsed = self._parse_task_row(
                 sheet_name="Tasks",
@@ -2395,7 +2504,37 @@ class SheetsService:
                 continue
             if self._task_match_key(parsed.title, parsed.assignee_name, parsed.due_date) == want:
                 return index
-        return None
+            if soft_match_idx is None and self._task_soft_key(parsed.title, parsed.assignee_name) == want_soft:
+                soft_match_idx = index
+        return soft_match_idx
+
+    def _personal_row_for(self, personal_ws: gspread.Worksheet, task: Task) -> int | None:
+        if task.sheet_name == personal_ws.title or (
+            task.sheet_gid and int(task.sheet_gid) == int(personal_ws.id)
+        ):
+            return task.row_index
+        all_values = self._get_sheet_values(personal_ws)
+        if len(all_values) <= 1:
+            return None
+        headers = all_values[0] or PERSONAL_HEADERS
+        want_exact = self._task_match_key(task.title, task.assignee_name, task.due_date)
+        want_soft = self._task_soft_key(task.title, task.assignee_name)
+        soft_match_idx = None
+        for index, row in enumerate(all_values[1:], start=2):
+            parsed = self._parse_task_row(
+                sheet_name=personal_ws.title,
+                headers=headers,
+                row=row,
+                row_index=index,
+                sheet_gid=int(personal_ws.id),
+            )
+            if parsed is None:
+                continue
+            if self._task_match_key(parsed.title, parsed.assignee_name, parsed.due_date) == want_exact:
+                return index
+            if soft_match_idx is None and self._task_soft_key(parsed.title, parsed.assignee_name) == want_soft:
+                soft_match_idx = index
+        return soft_match_idx
 
     def _find_task_by_id(self, task_id: str) -> Task | None:
         """Resolve a compact ``t:gid:row`` id, or a legacy ``sheet:row`` id."""
@@ -2415,10 +2554,13 @@ class SheetsService:
         if worksheet is None:
             return None
 
-        row_values = worksheet.row_values(row_index)
+        all_values = self._get_sheet_values(worksheet)
+        if row_index > len(all_values):
+            return None
+        row_values = all_values[row_index - 1]
         if not row_values:
             return None
-        actual_headers = worksheet.row_values(1)
+        actual_headers = all_values[0] if all_values else headers
         return self._parse_task_row(
             sheet_name=worksheet.title,
             headers=actual_headers if actual_headers else headers,
@@ -2429,7 +2571,6 @@ class SheetsService:
 
     def get_task_by_id(self, task_id: str, personnel: Personnel) -> Task | None:
         from services.auth import can_view_all_tasks, is_admin
-
         task = self._find_task_by_id(task_id)
         if task is None:
             return None
@@ -2453,19 +2594,15 @@ class SheetsService:
             return False
 
         self._personal_tasks_cache = None
+        self.invalidate_sheet_values(self._tasks_ws)
         updated = False
         personal_ws = self._personal_worksheet(task.assignee_name)
         if personal_ws is not None:
+            self.invalidate_sheet_values(personal_ws)
             # Only touch وضعیت — FILTER mirror tabs must not overwrite A:G spill.
-            target_row = (
-                task.row_index
-                if (not task.sheet_gid or int(task.sheet_gid) == int(personal_ws.id))
-                else None
-            )
-            if target_row is None and not self._personal_sheet_uses_tasks_filter(personal_ws):
-                target_row = task.row_index
-            if target_row is not None:
-                if self._write_status_cell(personal_ws, target_row, status):
+            personal_row = self._personal_row_for(personal_ws, task)
+            if personal_row is not None:
+                if self._write_status_cell(personal_ws, personal_row, status):
                     updated = True
 
         tasks_row = self._tasks_row_for(task)
@@ -2489,7 +2626,7 @@ class SheetsService:
         *,
         create_column: bool = False,
     ) -> bool:
-        headers = [str(h).strip() for h in worksheet.row_values(1)]
+        headers = self._get_sheet_headers(worksheet)
         try:
             col = headers.index(header_name) + 1
         except ValueError:
@@ -2500,6 +2637,7 @@ class SheetsService:
                 worksheet.add_cols(col - worksheet.col_count)
             worksheet.update_cell(1, col, header_name)
         worksheet.update_cell(row_index, col, value)
+        self.invalidate_sheet_values(worksheet)
         return True
 
     def update_task_note(self, task_id: str, personnel: Personnel, note: str) -> bool:
@@ -2510,15 +2648,9 @@ class SheetsService:
         updated = False
         personal_ws = self._personal_worksheet(task.assignee_name)
         if personal_ws is not None:
-            target_row = (
-                task.row_index
-                if (not task.sheet_gid or int(task.sheet_gid) == int(personal_ws.id))
-                else None
-            )
-            if target_row is None and not self._personal_sheet_uses_tasks_filter(personal_ws):
-                target_row = task.row_index
-            if target_row is not None:
-                if self._write_task_field(personal_ws, target_row, "توضیحات", note, create_column=True):
+            personal_row = self._personal_row_for(personal_ws, task)
+            if personal_row is not None:
+                if self._write_task_field(personal_ws, personal_row, "توضیحات", note, create_column=True):
                     updated = True
         tasks_row = self._tasks_row_for(task)
         if tasks_row is not None:
@@ -2556,8 +2688,7 @@ class SheetsService:
         task = self.get_task_by_id(task_id, personnel)
         if task is None or not (is_admin(personnel) or is_senior_admin(personnel)):
             return False
-        if priority not in PRIORITIES:
-            return False
+        priority = normalize_priority(priority)
         self._personal_tasks_cache = None
         updated = False
         tasks_row = self._tasks_row_for(task)
@@ -2645,7 +2776,7 @@ class SheetsService:
         ) -> None:
             if not allow_write:
                 return
-            all_values = worksheet.get_all_values()
+            all_values = self._get_sheet_values(worksheet)
             if len(all_values) <= 1:
                 return
             actual_headers = all_values[0] or headers

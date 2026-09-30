@@ -31,6 +31,7 @@ def today_jalali_str() -> str:
 PERSONNEL_CACHE_TTL_SEC = 45.0
 PROJECTS_CACHE_TTL_SEC = 45.0
 WORKSHEET_CACHE_TTL_SEC = 60.0
+SHEET_VALUES_CACHE_TTL_SEC = 25.0
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -48,7 +49,8 @@ PERSONNEL_HEADERS = [
 
 PERSONNEL_EXTRA_COLUMNS: tuple[tuple[str, str], ...] = (
     ("senior_admin", "مدیر ارشد"),
-    ("view_all_tasks", "مشاهده همه تسک"),
+    ("view_all_tasks", "تسک های افراد"),
+    ("create_task_access", "ثبت تسک"),
     ("filming_access", "تصویر برداری"),
     ("content_access", "تولید محتوا"),
     ("mobile", "موبایل"),
@@ -66,7 +68,8 @@ PERSONNEL_EXTRA_COLUMNS: tuple[tuple[str, str], ...] = (
 PERSONNEL_BOOL_HEADER_ALIASES: tuple[tuple[str, ...], ...] = (
     ("active", "فعال"),
     ("senior_admin", "مدیر ارشد"),
-    ("view_all_tasks", "مشاهده همه تسک"),
+    ("view_all_tasks", "تسک های افراد", "تسک‌های افراد", "مشاهده همه تسک", "دسترسی گروه"),
+    ("create_task_access", "ثبت تسک", "ایجاد تسک", "تسک زدن"),
     ("filming_access", "تصویر برداری"),
     ("content_access", "تولید محتوا"),
     ("sms_enabled", "ارسال پیامک", "پیامک", "اس ام اس", "ارسال sms", "ارسال اس ام اس"),
@@ -285,7 +288,27 @@ PERSIAN_MONTHS = [
     "اسفند",
 ]
 
-PRIORITIES = ("High", "Medium", "Low")
+PRIORITIES = ("بالا", "متوسط", "پایین", "High", "Medium", "Low")
+PRIORITIES_PERSIAN = ("بالا", "متوسط", "پایین")
+
+PRIORITY_MAP_TO_PERSIAN = {
+    "high": "بالا",
+    "medium": "متوسط",
+    "low": "پایین",
+    "بالا": "بالا",
+    "متوسط": "متوسط",
+    "پایین": "پایین",
+    "فوری": "بالا",
+    "زیاد": "بالا",
+    "معمولی": "متوسط",
+    "کم": "پایین",
+}
+
+
+def normalize_priority(val: str | None) -> str:
+    """Normalize any priority string (English or Persian) to standard Persian."""
+    v = str(val or "").strip().lower()
+    return PRIORITY_MAP_TO_PERSIAN.get(v, "متوسط")
 
 STATUS_OPEN = {"", "pending", "در انتظار", "⏳ در انتظار"}
 STATUS_IN_PROGRESS = {
@@ -298,10 +321,14 @@ STATUS_IN_PROGRESS = {
 }
 STATUS_DONE = {
     "done",
+    "completed",
     "انجام شده",
     "انجام شد",
     "تمام شده",
     "تمام شد",
+    "تکمیل شده",
+    "تکمیل شد",
+    "تکمیل",
     "✅ انجام شده",
     "✅ انجام شد",
 }
@@ -436,7 +463,7 @@ TEMPLATE_TEST_ROW: tuple[str, ...] = (
     TEMPLATE_TEST_TITLE,
     "عمومی",
     "Alfak, Dehghanian",
-    "Low",
+    "پایین",
     "ماهانه",
     "1",
     "5",
@@ -458,6 +485,7 @@ class Personnel:
     active: bool
     senior_admin: bool = False
     view_all_tasks: bool = False
+    create_task_access: bool = False
     filming_access: bool = False
     content_access: bool = False
     mobile: str = ""
@@ -780,14 +808,49 @@ def split_assignee_candidates(raw: str) -> list[str]:
     return parts or [normalize_name(raw).strip()]
 
 
+PERSONNEL_NAME_TO_PERSIAN: dict[str, str] = {
+    "alipour": "علیپور",
+    "bakhshande": "بخشنده",
+    "dehghanian": "دهقانیان",
+    "eidani": "عیدانی",
+    "hosseini": "حسینی",
+    "moradi": "مرادی",
+    "roozmand": "روزمند",
+    "alfak": "الفک",
+    "mr.sheikh": "شیخ",
+    "sheikh": "شیخ",
+    "baneshi": "بانشی",
+    "bakhshi": "بخشی",
+    "modir": "مدیر",
+}
+
+PERSONNEL_PERSIAN_TO_ENGLISH: dict[str, str] = {
+    normalize_name(v).lower(): k for k, v in PERSONNEL_NAME_TO_PERSIAN.items()
+}
+
+
+def to_persian_display_name(name: str) -> str:
+    """Map known English personnel names to Persian display names, or return as-is."""
+    raw = str(name or "").strip()
+    if not raw:
+        return ""
+    key = normalize_name(raw).lower()
+    return PERSONNEL_NAME_TO_PERSIAN.get(key, raw)
+
+
 def matches_assignee_name(task_assignee: str, target_name: str) -> bool:
-    """Return True if target_name matches task_assignee (resilient to formatting/multi-assignee)."""
+    """Return True if target_name matches task_assignee (resilient to formatting/multi-assignee/transliteration)."""
     norm_target = normalize_name(target_name).strip().lower()
     if not norm_target:
         return False
 
     target_no_spaces = norm_target.replace(" ", "")
     target_tokens = set(norm_target.split())
+    target_counterpart = (
+        PERSONNEL_NAME_TO_PERSIAN.get(norm_target)
+        or PERSONNEL_PERSIAN_TO_ENGLISH.get(norm_target)
+        or ""
+    )
 
     candidates = split_assignee_candidates(task_assignee)
     for cand in candidates:
@@ -796,6 +859,17 @@ def matches_assignee_name(task_assignee: str, target_name: str) -> bool:
             continue
 
         if norm_cand == norm_target:
+            return True
+
+        if target_counterpart and (norm_cand == target_counterpart or target_counterpart in norm_cand):
+            return True
+
+        cand_counterpart = (
+            PERSONNEL_NAME_TO_PERSIAN.get(norm_cand)
+            or PERSONNEL_PERSIAN_TO_ENGLISH.get(norm_cand)
+            or ""
+        )
+        if cand_counterpart and (cand_counterpart == norm_target or cand_counterpart in norm_target):
             return True
 
         cand_no_spaces = norm_cand.replace(" ", "")
@@ -900,7 +974,29 @@ def personnel_from_record(record: dict[str, str], telegram_id: int) -> Personnel
         str(record.get("senior_admin", record.get("مدیر ارشد", "FALSE")))
     )
     view_all_tasks = parse_bool(
-        str(record.get("view_all_tasks", record.get("مشاهده همه تسک", "FALSE")))
+        str(
+            record.get(
+                "view_all_tasks",
+                record.get(
+                    "تسک های افراد",
+                    record.get(
+                        "تسک‌های افراد",
+                        record.get("مشاهده همه تسک", record.get("دسترسی گروه", "FALSE")),
+                    ),
+                ),
+            )
+        )
+    )
+    create_task_access = parse_bool(
+        str(
+            record.get(
+                "create_task_access",
+                record.get(
+                    "ثبت تسک",
+                    record.get("ایجاد تسک", record.get("تسک زدن", "FALSE")),
+                ),
+            )
+        )
     )
     filming_access = parse_bool(
         str(record.get("filming_access", record.get("تصویر برداری", "FALSE")))
@@ -926,6 +1022,7 @@ def personnel_from_record(record: dict[str, str], telegram_id: int) -> Personnel
         active=record_is_active(record),
         senior_admin=senior_admin,
         view_all_tasks=view_all_tasks,
+        create_task_access=create_task_access,
         filming_access=filming_access,
         content_access=content_access,
         mobile=normalize_mobile(record_value(record, PERSONNEL_MOBILE_KEYS)),
@@ -956,6 +1053,7 @@ def coalesce_personnel(existing: Personnel, incoming: Personnel) -> Personnel:
         active=preferred.active or other.active,
         senior_admin=preferred.senior_admin or other.senior_admin,
         view_all_tasks=preferred.view_all_tasks or other.view_all_tasks,
+        create_task_access=preferred.create_task_access or other.create_task_access,
         filming_access=preferred.filming_access or other.filming_access,
         content_access=preferred.content_access or other.content_access,
         mobile=preferred.mobile or other.mobile,
@@ -981,12 +1079,13 @@ def role_label(role: str) -> str:
 
 def normalize_status(value: str) -> str:
     raw = " ".join(str(value).strip().split())
+    clean = normalize_name(raw).lower()
     lower = raw.lower()
-    if lower in STATUS_DONE or raw in STATUS_DONE:
+    if lower in STATUS_DONE or raw in STATUS_DONE or clean in STATUS_DONE:
         return "done"
-    if lower in STATUS_CANCELLED or raw in STATUS_CANCELLED:
+    if lower in STATUS_CANCELLED or raw in STATUS_CANCELLED or clean in STATUS_CANCELLED:
         return "cancelled"
-    if lower in STATUS_IN_PROGRESS or raw in STATUS_IN_PROGRESS:
+    if lower in STATUS_IN_PROGRESS or raw in STATUS_IN_PROGRESS or clean in STATUS_IN_PROGRESS:
         return "in_progress"
     return "pending"
 
@@ -1250,9 +1349,7 @@ def template_from_record(record: dict[str, str], row_index: int) -> TemplateEntr
         lead_days = int(lead_raw) if lead_raw else 0
     except ValueError:
         lead_days = 0
-    priority = str(record.get("اولویت", "")).strip() or "Medium"
-    if priority not in PRIORITIES:
-        priority = "Medium"
+    priority = normalize_priority(str(record.get("اولویت", "")).strip())
     return TemplateEntry(
         row_index=row_index,
         enabled=parse_bool(str(record.get("فعال", ""))),
@@ -1293,13 +1390,13 @@ def template_is_due(entry: TemplateEntry, today: jdatetime.date) -> bool:
 def task_match_key(title: str, assignee: str, due_date: str) -> str:
     due = validate_shamsi_date(due_date) or due_date.strip().lstrip("'")
     clean_title = normalize_name(title).lower()
-    clean_assignee = normalize_name(assignee).lower().replace(" ", "")
+    clean_assignee = to_persian_display_name(normalize_name(assignee)).lower().replace(" ", "")
     return f"{clean_assignee}|{clean_title}|{due}"
 
 
 def task_soft_key(title: str, assignee: str) -> str:
     clean_title = normalize_name(title).lower()
-    clean_assignee = normalize_name(assignee).lower().replace(" ", "")
+    clean_assignee = to_persian_display_name(normalize_name(assignee)).lower().replace(" ", "")
     return f"{clean_assignee}|{clean_title}"
 
 
@@ -1335,10 +1432,14 @@ def overlay_status_from_personal(main_tasks: list[Task], personal_tasks: list[Ta
             updated.append(task)
             continue
         personal = unused.pop(match_index)
-        if personal.status == task.status:
-            updated.append(task)
+        desc = personal.description.strip() or task.description.strip()
+        if personal.status in {"done", "cancelled", "in_progress"}:
+            status = personal.status
+        elif task.status in {"done", "cancelled", "in_progress"}:
+            status = task.status
         else:
-            updated.append(replace(task, status=personal.status))
+            status = personal.status or task.status or "pending"
+        updated.append(replace(task, status=status, description=desc))
     return updated
 
 

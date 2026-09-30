@@ -7,6 +7,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, KeyboardBu
 from services.sheets_models import (
     GENERAL_PROJECT_CATEGORIES,
     PRIORITIES,
+    PRIORITIES_PERSIAN,
     PROJECTS_PAGE_SIZE,
     REPORT_KIND_LABELS,
     TASKS_PAGE_SIZE,
@@ -28,7 +29,7 @@ CONTENT_BUTTON = "✍️ تولید محتوا"
 CREATE_CONTENT_BUTTON = "➕ ثبت تولید محتوا"
 LIST_CONTENT_BUTTON = "📋 لیست تولید محتوا"
 OPEN_CONTENT_SHEET_BUTTON = "📊 شیت دیزاین"
-TEAM_TASKS_BUTTON = "👥 تسک‌های گروه"
+TEAM_TASKS_BUTTON = "👥 تسک های افراد"
 MY_TASKS_BUTTON = "📌 تسک‌های من"
 ADMIN_MY_TASKS_BUTTON = "📋 تسک‌های من"
 DONE_TASKS_BUTTON = "✅ تسک‌های انجام‌شده"
@@ -66,6 +67,10 @@ DONE_TASKS_TEXTS = frozenset({
 })
 TEAM_TASKS_TEXTS = frozenset({
     TEAM_TASKS_BUTTON,
+    "👥 تسک‌های افراد",
+    "👥 تسک های افراد",
+    "تسک‌های افراد",
+    "تسک های افراد",
     "👥 تسک کارمندان",
     "👥 همه تسک‌ها",
     "تسک‌های گروه",
@@ -74,6 +79,8 @@ TEAM_TASKS_TEXTS = frozenset({
     "تسک های تیم",
     "👥 تسک‌های تیم",
     "👥 تسک های تیم",
+    "👥 تسک‌های گروه",
+    "👥 تسک های گروه",
 })
 IDEAS_TEXTS = frozenset({IDEAS_BUTTON, "ایده‌ها", "ایده ها"})
 FILMING_TEXTS = frozenset({FILMING_BUTTON, "تصویر برداری", "تصویربرداری"})
@@ -159,7 +166,8 @@ def is_team_tasks_text(text: str | None) -> bool:
         .strip()
     )
     return (
-        normalized.startswith("تسک های گروه")
+        normalized.startswith("تسک های افراد")
+        or normalized.startswith("تسک های گروه")
         or normalized.startswith("تسک های تیم")
         or normalized.startswith("تسک کارمندان")
         or normalized.startswith("همه تسک ها")
@@ -620,10 +628,10 @@ def content_person_keyboard(names: list[str]) -> InlineKeyboardMarkup:
 
 
 def priority_inline_keyboard() -> InlineKeyboardMarkup:
-    labels = {"High": "🔴 High", "Medium": "🟡 Medium", "Low": "🟢 Low"}
+    labels = {"بالا": "🔴 بالا", "متوسط": "🟡 متوسط", "پایین": "🟢 پایین"}
     buttons = [
         [InlineKeyboardButton(text=labels[p], callback_data=f"priority:{p}")]
-        for p in PRIORITIES
+        for p in PRIORITIES_PERSIAN
     ]
     buttons.append([InlineKeyboardButton(text="❌ انصراف", callback_data="cancel:create_task")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -812,10 +820,10 @@ def task_confirm_inline_keyboard() -> InlineKeyboardMarkup:
 
 
 def edit_priority_inline_keyboard(task_id: str) -> InlineKeyboardMarkup:
-    labels = {"High": "🔴 High", "Medium": "🟡 Medium", "Low": "🟢 Low"}
+    labels = {"بالا": "🔴 بالا", "متوسط": "🟡 متوسط", "پایین": "🟢 پایین"}
     buttons = [
         [InlineKeyboardButton(text=labels[p], callback_data=f"task:setpri:{task_id}:{p}")]
-        for p in PRIORITIES
+        for p in PRIORITIES_PERSIAN
     ]
     buttons.append([InlineKeyboardButton(text="🔙 بازگشت به تسک", callback_data=f"task:view:{task_id}")])
     return InlineKeyboardMarkup(inline_keyboard=buttons)

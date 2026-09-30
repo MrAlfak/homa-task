@@ -30,6 +30,7 @@ from services.sheets_models import (
     coalesce_personnel,
     encode_task_id,
     get_jalali_period_dates,
+    matches_assignee_name,
     normalize_mobile,
     normalize_sheet_title,
     normalize_status,
@@ -43,6 +44,7 @@ from services.sheets_models import (
     tehran_now,
     tehran_today,
     today_jalali_str,
+    to_persian_display_name,
     validate_shamsi_date,
 )
 
@@ -70,6 +72,25 @@ class AuthTests(unittest.TestCase):
         self.assertTrue(is_senior_admin(senior))
         self.assertTrue(can_view_all_tasks(senior))
         self.assertTrue(can_create_tasks(senior))
+
+    def test_employee_can_create_task_with_flag(self) -> None:
+        emp = _person(role="employee", name="علی", create_task_access=True)
+        self.assertFalse(is_admin(emp))
+        self.assertFalse(is_senior_admin(emp))
+        self.assertTrue(can_create_tasks(emp))
+        self.assertFalse(can_view_all_tasks(emp))
+
+    def test_employee_can_view_all_tasks_with_flag(self) -> None:
+        emp = _person(role="employee", name="رضا", view_all_tasks=True)
+        self.assertTrue(can_view_all_tasks(emp))
+        self.assertFalse(can_create_tasks(emp))
+
+    def test_team_tasks_button_label_and_text(self) -> None:
+        from bot.keyboards import TEAM_TASKS_BUTTON, is_team_tasks_text
+        self.assertEqual(TEAM_TASKS_BUTTON, "👥 تسک های افراد")
+        self.assertTrue(is_team_tasks_text("👥 تسک های افراد"))
+        self.assertTrue(is_team_tasks_text("تسک های افراد"))
+        self.assertTrue(is_team_tasks_text("👥 تسک‌های افراد"))
 
     def test_filming_update_is_assignee_or_admin(self) -> None:
         assignee = _person(name="سارا", filming_access=True)
@@ -116,6 +137,65 @@ class AuthTests(unittest.TestCase):
         )
         self.assertTrue(can_access_content(person))
         self.assertTrue(can_update_content_entry(person, entry))
+
+    def test_content_update_matches_transliterated_name(self) -> None:
+        person = _person(name="Eidani", content_access=True)
+        entry = ContentEntry(
+            row_index=3,
+            name="عیدانی",
+            project="کوه کاران",
+            post="✓",
+            story="",
+            status="pending",
+            created_by="مدیر",
+        )
+        self.assertTrue(can_access_content(person))
+        self.assertTrue(can_update_content_entry(person, entry))
+
+    def test_to_persian_display_name(self) -> None:
+        self.assertEqual(to_persian_display_name("Eidani"), "عیدانی")
+        self.assertEqual(to_persian_display_name("Alipour"), "علیپور")
+        self.assertEqual(to_persian_display_name("Bakhshande"), "بخشنده")
+        self.assertEqual(to_persian_display_name("Unknown"), "Unknown")
+
+    def test_matches_assignee_name_transliteration(self) -> None:
+        self.assertTrue(matches_assignee_name("عیدانی", "Eidani"))
+        self.assertTrue(matches_assignee_name("Eidani", "عیدانی"))
+        self.assertTrue(matches_assignee_name("خانم عیدانی", "Eidani"))
+        self.assertTrue(matches_assignee_name("علیپور", "Alipour"))
+        self.assertFalse(matches_assignee_name("بانشی", "Eidani"))
+
+    def test_overlay_status_preserves_done_from_personal(self) -> None:
+        main_task = Task(
+            sheet_name="Tasks",
+            row_index=10,
+            title="تکمیل قرارداد",
+            project="پروژه A",
+            assignee_name="Dehghanian",
+            created_by="مدیر",
+            created_at="1403/01/01",
+            due_date="1403/01/10",
+            priority="High",
+            status="pending",
+            description="",
+        )
+        personal_task = Task(
+            sheet_name="Dehghanian",
+            row_index=5,
+            title="تکمیل قرارداد",
+            project="پروژه A",
+            assignee_name="Dehghanian",
+            created_by="مدیر",
+            created_at="1403/01/01",
+            due_date="1403/01/10",
+            priority="High",
+            status="done",
+            description="انجام شد با موفقیت",
+        )
+        merged = overlay_status_from_personal([main_task], [personal_task])
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0].status, "done")
+        self.assertEqual(merged[0].description, "انجام شد با موفقیت")
 
 
 class ModelTests(unittest.TestCase):
@@ -789,7 +869,7 @@ class QuickTaskParsingTests(unittest.TestCase):
         self.assertEqual(res["employee"].name, "شیخ")
         self.assertEqual(res["project"], "هما")
         self.assertEqual(res["title"], "ساخت تیزر تبلیغاتی")
-        self.assertEqual(res["priority"], "High")
+        self.assertEqual(res["priority"], "بالا")
         self.assertTrue(len(res["due_date"]) >= 8)
 
     def test_persian_prefix_quicktask(self) -> None:
@@ -802,7 +882,7 @@ class QuickTaskParsingTests(unittest.TestCase):
         self.assertEqual(res["employee"].name, "علی پور")
         self.assertEqual(res["project"], "اینستاگرام")
         self.assertEqual(res["title"], "ادیت استوری هفتگی")
-        self.assertEqual(res["priority"], "Medium")
+        self.assertEqual(res["priority"], "متوسط")
 
     def test_empty_quicktask(self) -> None:
         from bot.handlers.admin_tasks import parse_quick_task
@@ -1179,6 +1259,84 @@ class FilmingAndAppendRowTests(unittest.TestCase):
         self.assertEqual(row[15], "در انتظار")
         # Col 16 (ایجاد کننده): مدیر
         self.assertEqual(row[16], "مدیر")
+
+
+class TestParseTaskRow(unittest.TestCase):
+    def test_parse_task_row_edge_cases(self):
+        from unittest.mock import MagicMock
+        from services.sheets import SheetsService
+        svc = object.__new__(SheetsService)
+        svc._normalize_status = lambda s: "done" if s in {"done", "انجام شده"} else "pending"
+        svc._row_to_dict = lambda headers, row: {h: row[i] if i < len(row) else "" for i, h in enumerate(headers)}
+
+        # 1. Bakhshande case: header is '5' instead of 'تسک'
+        headers = ['5', 'پروژه', 'مسوول تسک', 'ایجاد کننده', 'تاریخ ایجاد', 'ددلاین', 'اولویت', 'وضعیت', 'توضیحات']
+        row = ['طراحی پوستر', 'پروژه ۱', 'Bakhshande', 'مدیر', '1405/01/01', '1405/01/05', 'High', 'انجام شده', 'توضیح']
+        t = svc._parse_task_row(sheet_name="Bakhshande", headers=headers, row=row, row_index=2, sheet_gid=123)
+        self.assertIsNotNone(t)
+        self.assertEqual(t.title, "طراحی پوستر")
+        self.assertEqual(t.status, "done")
+        self.assertEqual(t.assignee_name, "Bakhshande")
+
+        # 2. Broken formula: #REF! in title
+        row_ref = ['#REF!', '', '', '', '', '', '', '', '']
+        t_ref = svc._parse_task_row(sheet_name="Alipour", headers=headers, row=row_ref, row_index=2, sheet_gid=123)
+        self.assertIsNone(t_ref)
+
+        # 3. Eidani case: duplicated 'اولویت' header instead of 'وضعیت'
+        eidani_headers = ['تسک', 'پروژه', 'مسوول تسک', 'ایجاد کننده', 'تاریخ ایجاد', 'ددلاین', 'اولویت', 'اولویت', 'توضیحات']
+        eidani_row = ['گزارش شهریور', 'کارهای مشترک', 'Eidani', 'مدیر', '1405/06/25', '1405/06/25', 'High', 'انجام شده', '']
+        t_eidani = svc._parse_task_row(sheet_name="Eidani", headers=eidani_headers, row=eidani_row, row_index=2, sheet_gid=456)
+        self.assertIsNotNone(t_eidani)
+        self.assertEqual(t_eidani.title, "گزارش شهریور")
+        self.assertEqual(t_eidani.status, "done")
+
+
+class TestSheetRateLimitAndCaching(unittest.TestCase):
+    def test_sheet_values_caching(self) -> None:
+        from unittest.mock import MagicMock
+        from services.sheets import SheetsService
+
+        svc = SheetsService.__new__(SheetsService)
+        ws = MagicMock()
+        ws.id = 999
+        ws.get_all_values.return_value = [["H1", "H2"], ["A", "B"]]
+
+        # First read hits API
+        res1 = svc._get_sheet_values(ws)
+        self.assertEqual(res1, [["H1", "H2"], ["A", "B"]])
+        self.assertEqual(ws.get_all_values.call_count, 1)
+
+        # Second read within TTL hits cache (0 API calls)
+        res2 = svc._get_sheet_values(ws)
+        self.assertEqual(res2, [["H1", "H2"], ["A", "B"]])
+        self.assertEqual(ws.get_all_values.call_count, 1)
+
+        # Invalidation clears cache
+        svc.invalidate_sheet_values(ws)
+        res3 = svc._get_sheet_values(ws)
+        self.assertEqual(res3, [["H1", "H2"], ["A", "B"]])
+        self.assertEqual(ws.get_all_values.call_count, 2)
+
+    def test_retry_delay_for_429(self) -> None:
+        from unittest.mock import MagicMock
+        from gspread.exceptions import APIError
+        from services.sheets_async import _retry_delay
+
+        response = MagicMock()
+        response.status_code = 429
+        exc = APIError(response)
+
+        # Attempt 0: 4.0
+        self.assertEqual(_retry_delay(exc, 0), 4.0)
+        # Attempt 1: 10.0
+        self.assertEqual(_retry_delay(exc, 1), 10.0)
+        # Attempt 2: 16.0
+        self.assertEqual(_retry_delay(exc, 2), 16.0)
+        # Attempt 3: 22.0
+        self.assertEqual(_retry_delay(exc, 3), 22.0)
+        # Attempt 4: 28.0
+        self.assertEqual(_retry_delay(exc, 4), 28.0)
 
 
 if __name__ == "__main__":

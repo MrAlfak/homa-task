@@ -45,13 +45,13 @@ def is_senior_admin(personnel: Personnel) -> bool:
 
 
 def can_view_all_tasks(personnel: Personnel) -> bool:
-    """Senior admin with view_all_tasks enabled can see every assignee's tasks."""
-    return is_senior_admin(personnel) and personnel.view_all_tasks
+    """Senior admin, or any user with view_all_tasks (تسک های افراد) enabled, can see every assignee's tasks."""
+    return bool(personnel.view_all_tasks or (is_senior_admin(personnel) and personnel.view_all_tasks))
 
 
 def can_create_tasks(personnel: Personnel) -> bool:
-    """Full admin and senior admins may register new tasks."""
-    return is_admin(personnel) or is_senior_admin(personnel)
+    """Full admin, senior admins, or users with create_task_access may register new tasks."""
+    return is_admin(personnel) or is_senior_admin(personnel) or personnel.create_task_access
 
 
 def can_access_filming(personnel: Personnel) -> bool:

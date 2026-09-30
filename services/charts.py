@@ -12,6 +12,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+import matplotlib.ticker as ticker
 from bidi.algorithm import get_display
 from matplotlib import font_manager
 
@@ -23,6 +24,7 @@ from services.sheets_models import (
     parse_due_as_jalali,
     shamsi_today,
     tehran_today,
+    to_persian_display_name,
     validate_shamsi_date,
 )
 
@@ -64,7 +66,7 @@ def _font() -> font_manager.FontProperties | None:
 
 
 def fa(text: object) -> str:
-    return get_display(arabic_reshaper.reshape(str(text)))
+    return get_display(arabic_reshaper.reshape(str(text)), base_dir="R")
 
 
 def _open_tasks(tasks: list[Task]) -> list[Task]:
@@ -77,6 +79,16 @@ def _created_month(task: Task) -> tuple[int, int] | None:
         return None
     year, month, _day = (int(part) for part in normalized.split("/"))
     return year, month
+
+
+def _task_month(task: Task) -> tuple[int, int] | None:
+    res = _created_month(task)
+    if res is not None:
+        return res
+    due = parse_due_as_jalali(task.due_date)
+    if due is not None:
+        return (due.year, due.month)
+    return None
 
 
 def render_report(kind: str, tasks: list[Task], *, kinds: tuple[str, ...] | None = None) -> bytes:
@@ -92,14 +104,17 @@ def render_report(kind: str, tasks: list[Task], *, kinds: tuple[str, ...] | None
         return _render_grid(panels, tasks, today, today_str, font)
     height = 6.8
     if kind == "people":
-        people = {normalize_name(task.assignee_name).strip() or "—" for task in _open_tasks(tasks)}
-        height = max(7.2, 0.46 * min(MAX_PEOPLE_BARS, max(1, len(people))) + 3.2)
+        people = {to_persian_display_name(normalize_name(task.assignee_name)).strip() or "بدون مسئول" for task in _open_tasks(tasks)}
+        height = max(7.2, 0.48 * min(MAX_PEOPLE_BARS, max(1, len(people))) + 3.2)
+    elif kind == "project":
+        projects = {task.project.strip() or "بدون پروژه" for task in _open_tasks(tasks)}
+        height = max(6.8, 0.48 * min(MAX_BARS, max(1, len(projects))) + 3.0)
     fig, ax = plt.subplots(figsize=(11.6, height), facecolor=BG)
     ax.set_facecolor(BG)
     _draw_kind(ax, kind, tasks, today, font)
     fig.suptitle(fa(_title(kind, today_str)), fontproperties=font, fontsize=16, color=FG, y=0.98)
     fig.text(0.97, 0.03, fa(_footer(tasks, today)), ha="right", fontproperties=font, fontsize=9, color=MUTED)
-    right = 0.82 if kind in {"people", "project"} else 0.97
+    right = 0.78 if kind in {"people", "project"} else 0.96
     fig.tight_layout(rect=(0.04, 0.08, right, 0.92))
     return _to_png(fig)
 
@@ -114,19 +129,19 @@ def _render_grid(
     count = len(panels)
     cols = 2 if count > 1 else 1
     rows = (count + cols - 1) // cols
-    fig, axes = plt.subplots(rows, cols, figsize=(12.4, 4.2 * rows + 1.4), facecolor=BG)
+    fig, axes = plt.subplots(rows, cols, figsize=(13.2, 4.8 * rows + 1.2), facecolor=BG)
     flat = [axes] if count == 1 else list(axes.ravel()) if hasattr(axes, "ravel") else [axes]
     fig.suptitle(fa(f"خلاصه گزارش  ·  {today_str}"), fontproperties=font, fontsize=16, color=FG, y=0.99)
     for index, kind in enumerate(panels):
         ax = flat[index]
         ax.set_facecolor(BG)
         _draw_kind(ax, kind, tasks, today, font)
-        ax.set_title(fa(_short_title(kind)), fontproperties=font, fontsize=12, color="#334155", pad=8, loc="right")
+        ax.set_title(fa(_short_title(kind)), fontproperties=font, fontsize=12, color="#334155", pad=28, loc="right")
     for extra in flat[len(panels) :]:
         extra.axis("off")
         extra.set_facecolor(BG)
     fig.text(0.97, 0.02, fa(_footer(tasks, today)), ha="right", fontproperties=font, fontsize=9, color=MUTED)
-    fig.tight_layout(rect=(0.04, 0.07, 0.88, 0.94))
+    fig.tight_layout(rect=(0.04, 0.06, 0.88, 0.93))
     return _to_png(fig)
 
 
@@ -187,7 +202,8 @@ def _draw_kind(
 def _rtl_barh(ax) -> None:
     ax.yaxis.tick_right()
     ax.yaxis.set_ticks_position("right")
-    ax.invert_xaxis()
+    if not ax.xaxis_inverted():
+        ax.invert_xaxis()
     ax.tick_params(axis="y", length=0, pad=6)
     ax.tick_params(axis="x", colors=MUTED)
     for spine in ("top", "left"):
@@ -200,23 +216,37 @@ def _draw_status(ax, tasks: list[Task], font: font_manager.FontProperties | None
     counts = Counter(task.status for task in tasks)
     sizes = [counts.get(key, 0) for key in STATUS_ORDER]
     colors = [STATUS_COLORS[key] for key in STATUS_ORDER]
-    if sum(sizes) == 0:
+    total = sum(sizes)
+    if total == 0:
         sizes = [1]
         colors = ["#d6d3cd"]
-    wedges, *_rest = ax.pie(
-        sizes,
-        colors=colors,
-        startangle=90,
-        counterclock=False,
-        center=(-0.2, 0.0),
-        wedgeprops={"linewidth": 2, "edgecolor": BG},
-    )
-    labels = [fa(f"{STATUS_FA[key]}  {counts.get(key, 0)}") for key in STATUS_ORDER]
+        wedges, *_rest = ax.pie(
+            sizes,
+            colors=colors,
+            startangle=90,
+            counterclock=False,
+            center=(-0.2, 0.0),
+            wedgeprops={"linewidth": 2, "edgecolor": BG},
+        )
+        labels = [fa(f"{STATUS_FA[key]}: 0") for key in STATUS_ORDER]
+    else:
+        wedges, *_rest = ax.pie(
+            sizes,
+            colors=colors,
+            startangle=90,
+            counterclock=False,
+            center=(-0.2, 0.0),
+            wedgeprops={"linewidth": 2, "edgecolor": BG},
+        )
+        labels = [
+            fa(f"{STATUS_FA[key]}: {counts.get(key, 0)} ({round(counts.get(key, 0) / total * 100)}٪)")
+            for key in STATUS_ORDER
+        ]
     ax.legend(
         wedges,
         labels,
         loc="center left",
-        bbox_to_anchor=(0.92, 0.5),
+        bbox_to_anchor=(0.90, 0.5),
         prop=font,
         frameon=False,
         labelspacing=0.9,
@@ -227,7 +257,11 @@ def _count_open_and_overdue(tasks: list[Task], today: jdatetime.date, field: str
     opened: Counter[str] = Counter()
     overdue: Counter[str] = Counter()
     for task in _open_tasks(tasks):
-        name = (normalize_name(task.assignee_name) if field == "assignee" else task.project).strip() or "—"
+        if field == "assignee":
+            raw_name = to_persian_display_name(normalize_name(task.assignee_name)).strip()
+            name = raw_name or "بدون مسئول"
+        else:
+            name = task.project.strip() or "بدون پروژه"
         opened[name] += 1
         due = parse_due_as_jalali(task.due_date)
         if due is not None and due < today:
@@ -246,7 +280,7 @@ def _count_people_open(tasks: list[Task], today: jdatetime.date) -> list[tuple[s
     progress: Counter[str] = Counter()
     overdue: Counter[str] = Counter()
     for task in _open_tasks(tasks):
-        name = normalize_name(task.assignee_name).strip() or "—"
+        name = to_persian_display_name(normalize_name(task.assignee_name)).strip() or "بدون مسئول"
         due = parse_due_as_jalali(task.due_date)
         if due is not None and due < today:
             overdue[name] += 1
@@ -286,9 +320,9 @@ def _draw_people(ax, tasks: list[Task], today: jdatetime.date, font: font_manage
     for name, pending, progress, overdue in rows:
         total = pending + progress + overdue
         if overdue:
-            labels.append(f"{name}   {total} باز · {overdue} عقب")
+            labels.append(f"{name}: {total} باز ({overdue} عقب‌افتاده)")
         else:
-            labels.append(f"{name}   {total} باز")
+            labels.append(f"{name}: {total} باز")
         pending_vals.append(pending)
         progress_vals.append(progress)
         overdue_vals.append(overdue)
@@ -315,9 +349,10 @@ def _draw_people(ax, tasks: list[Task], today: jdatetime.date, font: font_manage
     ax.set_yticks(y)
     ax.set_yticklabels([fa(label) for label in labels], fontproperties=font, fontsize=9)
     max_total = max(totals) if totals else 1
+    ax.set_xlim(max_total * 1.15 + 0.5, 0)
     for index, total in enumerate(totals):
         ax.text(
-            total + max(0.35, max_total * 0.02),
+            total + max_total * 0.02 + 0.15,
             y[index],
             str(total),
             va="center",
@@ -325,8 +360,9 @@ def _draw_people(ax, tasks: list[Task], today: jdatetime.date, font: font_manage
             fontsize=8,
             color=MUTED,
         )
-    ax.legend(prop=font, frameon=False, loc="lower left", ncol=1)
+    ax.legend(prop=font, frameon=False, loc="lower left", bbox_to_anchor=(0.0, 1.01), ncol=3)
     ax.set_xlabel(fa("تعداد تسک باز"), fontproperties=font, color=MUTED, loc="right")
+    ax.xaxis.set_major_locator(ticker.MaxNLocator(integer=True))
     _rtl_barh(ax)
 
 
@@ -343,15 +379,19 @@ def _draw_named_bars(ax, rows: list[tuple[str, int, int]], font: font_manager.Fo
     ax.barh(y, still_open, color="#5b8def", height=0.62, label=fa("باز و به‌موقع"))
     ax.barh(y, overdue_counts, left=still_open, color=OVERDUE_COLOR, height=0.62, label=fa("عقب‌افتاده"))
     ax.set_yticks(y)
-    ax.set_yticklabels(
-        [fa(f"{name}   {count}") for name, count in zip(names, open_counts)],
-        fontproperties=font,
-        fontsize=9,
-    )
+    labels = []
+    for name, count, late in zip(names, open_counts, overdue_counts):
+        display_name = name[:20] + "…" if len(name) > 20 else name
+        if late:
+            labels.append(f"{display_name}: {count} باز ({late} عقب‌افتاده)")
+        else:
+            labels.append(f"{display_name}: {count} باز")
+    ax.set_yticklabels([fa(label) for label in labels], fontproperties=font, fontsize=9)
     max_open = max(open_counts) if open_counts else 1
+    ax.set_xlim(max_open * 1.15 + 0.5, 0)
     for index, count in enumerate(open_counts):
         ax.text(
-            count + max(0.35, max_open * 0.02),
+            count + max_open * 0.02 + 0.15,
             y[index],
             str(count),
             va="center",
@@ -359,7 +399,8 @@ def _draw_named_bars(ax, rows: list[tuple[str, int, int]], font: font_manager.Fo
             fontsize=8,
             color=MUTED,
         )
-    ax.legend(prop=font, frameon=False, loc="lower left")
+    ax.legend(prop=font, frameon=False, loc="lower left", bbox_to_anchor=(0.0, 1.01), ncol=2)
+    ax.xaxis.set_major_locator(ticker.MaxNLocator(integer=True))
     _rtl_barh(ax)
 
 
@@ -369,7 +410,7 @@ def _draw_deadline(ax, tasks: list[Task], today: jdatetime.date, font: font_mana
     for task in _open_tasks(tasks):
         due = parse_due_as_jalali(task.due_date)
         if due is None:
-            buckets["بدون ددلاین"] += 1
+            buckets["بدون‌ددلاین"] += 1
         elif due < today:
             buckets["عقب‌افتاده"] += 1
         elif due == today:
@@ -378,7 +419,7 @@ def _draw_deadline(ax, tasks: list[Task], today: jdatetime.date, font: font_mana
             buckets["تا ۷ روز"] += 1
         else:
             buckets["بعداً"] += 1
-    labels = ["عقب‌افتاده", "امروز", "تا ۷ روز", "بعداً", "بدون ددلاین"]
+    labels = ["عقب‌افتاده", "امروز", "تا ۷ روز", "بعداً", "بدون‌ددلاین"]
     colors = [OVERDUE_COLOR, "#e6b325", "#5b8def", "#3f9b6e", "#94a3b8"]
     values = [buckets.get(label, 0) for label in labels]
     x = list(range(len(labels)))
@@ -386,12 +427,16 @@ def _draw_deadline(ax, tasks: list[Task], today: jdatetime.date, font: font_mana
     ax.set_xticks(x)
     ax.set_xticklabels([fa(label) for label in labels], fontproperties=font, fontsize=9)
     peak = max(values) if values else 1
+    ax.set_ylim(0, max(peak * 1.25, 4))
     for index, value in enumerate(values):
-        ax.text(index, value + peak * 0.03, str(value), ha="center", fontsize=8, color=MUTED)
-    ax.invert_xaxis()
+        if value > 0:
+            ax.text(index, value + max(peak * 0.03, 0.1), str(value), ha="center", fontsize=8, color=MUTED)
+    if not ax.xaxis_inverted():
+        ax.invert_xaxis()
     for spine in ("top", "left"):
         ax.spines[spine].set_visible(False)
     ax.yaxis.tick_right()
+    ax.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
     ax.tick_params(axis="y", colors=MUTED)
 
 
@@ -401,7 +446,7 @@ def _draw_month(ax, tasks: list[Task], today: jdatetime.date, font: font_manager
     prev_key = (today.year if prev else today.year - 1, prev if prev else 12)
     this_open = this_done = prev_open = prev_done = 0
     for task in tasks:
-        month_key = _created_month(task)
+        month_key = _task_month(task)
         if month_key == this_key:
             if task.status == "done":
                 this_done += 1
@@ -421,12 +466,21 @@ def _draw_month(ax, tasks: list[Task], today: jdatetime.date, font: font_manager
     ax.bar([i + 0.18 for i in x], [prev_done, this_done], width=0.36, color="#3f9b6e", label=fa("انجام‌شده"))
     ax.set_xticks(x)
     ax.set_xticklabels(labels, fontproperties=font)
-    ax.legend(prop=font, frameon=False, loc="upper left")
-    ax.invert_xaxis()
+    ax.legend(prop=font, frameon=False, loc="lower left", bbox_to_anchor=(0.0, 1.01), ncol=2)
+    if not ax.xaxis_inverted():
+        ax.invert_xaxis()
     ax.yaxis.tick_right()
     for spine in ("top", "left"):
         ax.spines[spine].set_visible(False)
+    peak = max(prev_open, this_open, prev_done, this_done)
+    ax.set_ylim(0, max(peak * 1.25, 4))
+    ax.yaxis.set_major_locator(ticker.MaxNLocator(integer=True))
     ax.tick_params(axis="y", colors=MUTED)
+    vals = [prev_open, this_open, prev_done, this_done]
+    x_positions = [-0.18, 1 - 0.18, 0.18, 1 + 0.18]
+    for x_pos, val in zip(x_positions, vals):
+        if val > 0:
+            ax.text(x_pos, val + max(peak * 0.03, 0.1), str(val), ha="center", fontsize=8, color=MUTED)
 
 
 def _to_png(fig) -> bytes:

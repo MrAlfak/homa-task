@@ -79,11 +79,11 @@ def find_matching_project(query: str, projects: list[str]) -> str | None:
 def parse_priority_str(s: str) -> str | None:
     norm = s.strip().lower()
     if norm in {"high", "فوری", "بالا", "زیاد", "قرمز"}:
-        return "High"
+        return "بالا"
     if norm in {"medium", "متوسط", "معمولی", "زرد"}:
-        return "Medium"
+        return "متوسط"
     if norm in {"low", "پایین", "کم", "سبز"}:
-        return "Low"
+        return "پایین"
     return None
 
 
@@ -131,7 +131,7 @@ def parse_quick_task(
     if len(title) < 2:
         return {"error": "عنوان تسک باید حداقل ۲ کاراکتر باشد."}
 
-    priority = "Medium"
+    priority = "متوسط"
     due_date = resolve_shamsi_date_offset(0) or ""
 
     if len(parts) >= 4:
@@ -452,7 +452,7 @@ async def _show_task_confirmation(target, state: FSMContext) -> None:
     assignee_name = data.get("assignee_name", "-")
     project = data.get("project", "-")
     title = data.get("title", "-")
-    priority = data.get("priority", "Medium")
+    priority = data.get("priority", "متوسط")
     due_date = data.get("due_date", "-")
 
     text = (
@@ -606,7 +606,7 @@ async def _finalize_task(message: Message | None, from_user, state: FSMContext) 
         assignee_sms_enabled = bool(data.get("assignee_sms_enabled", False))
         title = data.get("title", "")
         project = data.get("project", "")
-        priority = data.get("priority", "Medium")
+        priority = data.get("priority", "متوسط")
         due_date = data.get("due_date", "")
         creator_name = data.get("creator_name") or ""
         creator_id = data.get("creator_id")

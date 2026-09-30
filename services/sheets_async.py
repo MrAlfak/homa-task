@@ -23,7 +23,7 @@ T = TypeVar("T")
 # transient server-side hiccups (5xx). Anything else (permission, not-found,
 # bad request) is a real error and should fail fast.
 _TRANSIENT_API_CODES = {429, 500, 502, 503, 504}
-_RETRY_ATTEMPTS = 4
+_RETRY_ATTEMPTS = 5
 _RETRY_BASE_DELAY = 0.6
 _sheets_lock = asyncio.Lock()
 
@@ -39,8 +39,9 @@ def _retry_delay(exc: Exception | None, attempt: int) -> float:
     if isinstance(exc, APIError):
         try:
             if exc.response.status_code == 429:
-                # 429 Quota is per-minute; wait longer to let the quota window reset
-                return 3.5 * (attempt + 1)
+                # 429 Quota is per-minute; wait progressively (e.g. 4s, 10s, 16s, 22s, 28s)
+                # to let Google Sheets API rolling 1-minute quota window reset completely.
+                return 4.0 * (attempt + 1) + (attempt * 2.0)
         except Exception:
             pass
     return _RETRY_BASE_DELAY * (attempt + 1)

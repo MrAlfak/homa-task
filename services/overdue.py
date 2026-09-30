@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 # How often to re-scan Sheets / re-color / remind (seconds).
 OVERDUE_INTERVAL_SEC = 3600.0
 # Delay after bot startup before the first pass (Sheets warm-up).
-OVERDUE_STARTUP_DELAY_SEC = 45.0
+OVERDUE_STARTUP_DELAY_SEC = 90.0
 
 _NOTIFIED_PATH = Path("/tmp/homa_overdue_notified.json")
 
@@ -218,7 +218,7 @@ async def send_daily_morning_digest(bot: Bot) -> None:
                 notified[notify_key] = today_str
                 continue
 
-            urgent_count = sum(1 for t in open_tasks if (t.priority or "").lower() == "high")
+            urgent_count = sum(1 for t in open_tasks if (t.priority or "").lower() in ("high", "بالا", "فوری"))
             due_today_count = sum(1 for t in open_tasks if t.due_date and t.due_date.strip() == today_str)
 
             urgent_line = f"\n⚡ <b>{urgent_count} تسک فوری</b>" if urgent_count > 0 else ""
