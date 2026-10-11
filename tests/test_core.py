@@ -156,6 +156,8 @@ class AuthTests(unittest.TestCase):
         self.assertEqual(to_persian_display_name("Eidani"), "عیدانی")
         self.assertEqual(to_persian_display_name("Alipour"), "علیپور")
         self.assertEqual(to_persian_display_name("Bakhshande"), "بخشنده")
+        self.assertEqual(to_persian_display_name("Amiri"), "امیری")
+        self.assertEqual(to_persian_display_name("Dastranj"), "دسترنج")
         self.assertEqual(to_persian_display_name("Unknown"), "Unknown")
 
     def test_matches_assignee_name_transliteration(self) -> None:
@@ -163,6 +165,8 @@ class AuthTests(unittest.TestCase):
         self.assertTrue(matches_assignee_name("Eidani", "عیدانی"))
         self.assertTrue(matches_assignee_name("خانم عیدانی", "Eidani"))
         self.assertTrue(matches_assignee_name("علیپور", "Alipour"))
+        self.assertTrue(matches_assignee_name("امیری", "Amiri"))
+        self.assertTrue(matches_assignee_name("دسترنج", "Dastranj"))
         self.assertFalse(matches_assignee_name("بانشی", "Eidani"))
 
     def test_overlay_status_preserves_done_from_personal(self) -> None:
@@ -1337,6 +1341,70 @@ class TestSheetRateLimitAndCaching(unittest.TestCase):
         self.assertEqual(_retry_delay(exc, 3), 22.0)
         # Attempt 4: 28.0
         self.assertEqual(_retry_delay(exc, 4), 28.0)
+
+    def test_update_cached_cell(self) -> None:
+        from unittest.mock import MagicMock
+        from services.sheets import SheetsService
+
+        svc = SheetsService.__new__(SheetsService)
+        ws = MagicMock()
+        ws.id = 888
+        ws.get_all_values.return_value = [["تسک", "وضعیت"], ["Task1", "در انتظار"]]
+
+        # Read into cache
+        vals = svc._get_sheet_values(ws)
+        self.assertEqual(vals[1][1], "در انتظار")
+        self.assertEqual(ws.get_all_values.call_count, 1)
+
+        # Update cached cell directly
+        svc._update_cached_cell(ws, row_index=2, col_index=2, value="انجام شده")
+
+        # Next read gets updated cell with 0 API calls
+        vals2 = svc._get_sheet_values(ws)
+        self.assertEqual(vals2[1][1], "انجام شده")
+        self.assertEqual(ws.get_all_values.call_count, 1)
+
+    def test_task_permissions_creator_and_viewer(self) -> None:
+        from unittest.mock import MagicMock
+        from services.sheets import SheetsService
+
+        svc = SheetsService.__new__(SheetsService)
+        task = Task(
+            sheet_name="Tasks",
+            row_index=10,
+            title="طراحی بنر",
+            project="هما",
+            assignee_name="Bakhshande",
+            created_by="Alipour",
+            created_at="1405/01/01",
+            due_date="1405/01/05",
+            priority="متوسط",
+            status="pending",
+            description="",
+            sheet_gid=111,
+        )
+        svc._find_task_by_id = MagicMock(return_value=task)
+
+        # 1. Assignee can access
+        assignee = _person(name="Bakhshande", role="employee")
+        self.assertIsNotNone(svc.get_task_by_id("t:111:10", assignee))
+
+        # 2. Creator can access
+        creator = _person(name="Alipour", role="employee")
+        self.assertIsNotNone(svc.get_task_by_id("t:111:10", creator))
+
+        # 3. User with view_all_tasks can access
+        viewer = _person(name="Eidani", role="employee", view_all_tasks=True)
+        self.assertIsNotNone(svc.get_task_by_id("t:111:10", viewer))
+
+        # 4. User with create_task_access can access
+        task_creator = _person(name="Moradi", role="employee", create_task_access=True)
+        self.assertIsNotNone(svc.get_task_by_id("t:111:10", task_creator))
+
+        # 5. Unrelated employee without special rights cannot access
+        unrelated = _person(name="Other", role="employee")
+        self.assertIsNone(svc.get_task_by_id("t:111:10", unrelated))
+
 
 
 if __name__ == "__main__":

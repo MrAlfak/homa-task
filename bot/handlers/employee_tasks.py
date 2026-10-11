@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, Message
 
@@ -28,7 +29,7 @@ from bot.keyboards import (
     user_tasks_keyboard,
 )
 from bot.states import TaskEditStates, TaskNoteStates
-from services.auth import can_view_all_tasks, is_admin, is_senior_admin
+from services.auth import can_create_tasks, can_view_all_tasks, is_admin, is_senior_admin
 from services.sheets import Personnel, Task
 from services.sheets_async import SheetsAsync, authorize
 from services.sheets_models import (
@@ -496,7 +497,10 @@ async def view_task(callback: CallbackQuery) -> None:
     is_mgr = is_admin(auth.personnel) or is_senior_admin(auth.personnel)
     can_update = (
         matches_assignee_name(task.assignee_name, auth.personnel.name)
+        or (task.created_by and matches_assignee_name(task.created_by, auth.personnel.name))
         or is_mgr
+        or can_view_all_tasks(auth.personnel)
+        or can_create_tasks(auth.personnel)
     )
     back_callback = await _back_callback_for_task(auth.personnel, task)
     await callback.message.edit_text(
@@ -546,21 +550,32 @@ async def update_task_status(callback: CallbackQuery) -> None:
     is_mgr = is_admin(auth.personnel) or is_senior_admin(auth.personnel)
     can_update = (
         matches_assignee_name(task.assignee_name, auth.personnel.name)
+        or (task.created_by and matches_assignee_name(task.created_by, auth.personnel.name))
         or is_mgr
+        or can_view_all_tasks(auth.personnel)
+        or can_create_tasks(auth.personnel)
     )
     back_callback = await _back_callback_for_task(auth.personnel, task)
-    await callback.message.edit_text(
-        format_task_detail(task, show_assignee=show_assignee),
-        reply_markup=task_detail_keyboard(
-            task,
-            can_update_status=can_update,
-            back_callback=back_callback,
-            is_manager=is_mgr,
-        ),
-        parse_mode="HTML",
-    )
+    try:
+        await callback.message.edit_text(
+            format_task_detail(task, show_assignee=show_assignee),
+            reply_markup=task_detail_keyboard(
+                task,
+                can_update_status=can_update,
+                back_callback=back_callback,
+                is_manager=is_mgr,
+            ),
+            parse_mode="HTML",
+        )
+    except TelegramBadRequest as exc:
+        if "message is not modified" not in str(exc).lower():
+            logger.warning("Could not edit task message on status update: %s", exc)
 
-    if matches_assignee_name(task.assignee_name, auth.personnel.name) or not is_mgr:
+    if (
+        matches_assignee_name(task.assignee_name, auth.personnel.name)
+        or (task.created_by and matches_assignee_name(task.created_by, auth.personnel.name))
+        or not is_mgr
+    ):
         open_count = await SheetsAsync.get_open_tasks_count(auth.personnel)
         await callback.message.answer(
             f"✅ وضعیت تسک «{task.title}» به «{status_to_sheet(new_status)}» تغییر یافت.",

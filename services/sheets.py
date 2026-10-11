@@ -346,6 +346,26 @@ class SheetsService:
                 sheet_id = int(worksheet)
             cache.pop(sheet_id, None)
 
+    def _update_cached_cell(
+        self,
+        worksheet: gspread.Worksheet | int,
+        row_index: int,
+        col_index: int,
+        value: str,
+    ) -> None:
+        """Update a specific cell inside the in-memory values cache."""
+        cache = getattr(self, "_sheet_values_cache", None)
+        if not cache:
+            return
+        sheet_id = int(getattr(worksheet, "id", worksheet) or 0)
+        if sheet_id in cache:
+            cached_at, values = cache[sheet_id]
+            if 0 < row_index <= len(values):
+                row = values[row_index - 1]
+                if col_index > len(row):
+                    row.extend([""] * (col_index - len(row)))
+                row[col_index - 1] = str(value)
+
     def _get_personnel_records(self) -> list[dict[str, str]]:
         """Cached Personnel rows to avoid full-sheet reads on every message."""
         now = time.monotonic()
@@ -2475,9 +2495,9 @@ class SheetsService:
             status_col = len(headers) + 1
             if worksheet.col_count < status_col:
                 worksheet.add_cols(status_col - worksheet.col_count)
-            worksheet.update_cell(1, status_col, STATUS_HEADER)
-        worksheet.update_cell(row_index, status_col, self._status_to_sheet(status))
-        self.invalidate_sheet_values(worksheet)
+        sheet_val = self._status_to_sheet(status)
+        worksheet.update_cell(row_index, status_col, sheet_val)
+        self._update_cached_cell(worksheet, row_index, status_col, sheet_val)
         return True
 
     def _tasks_row_for(self, task: Task) -> int | None:
@@ -2570,7 +2590,7 @@ class SheetsService:
         )
 
     def get_task_by_id(self, task_id: str, personnel: Personnel) -> Task | None:
-        from services.auth import can_view_all_tasks, is_admin
+        from services.auth import can_create_tasks, can_view_all_tasks, is_admin
         task = self._find_task_by_id(task_id)
         if task is None:
             return None
@@ -2578,27 +2598,32 @@ class SheetsService:
             return task
         if matches_assignee_name(task.assignee_name, personnel.name):
             return task
+        if task.created_by and matches_assignee_name(task.created_by, personnel.name):
+            return task
+        if can_create_tasks(personnel):
+            return task
         return None
 
     def update_task_status(self, task_id: str, personnel: Personnel, status: str) -> bool:
-        from services.auth import is_admin, is_senior_admin
+        from services.auth import can_create_tasks, can_view_all_tasks, is_admin, is_senior_admin
 
         task = self.get_task_by_id(task_id, personnel)
         if task is None:
             return False
         if (
             not matches_assignee_name(task.assignee_name, personnel.name)
+            and not (task.created_by and matches_assignee_name(task.created_by, personnel.name))
             and not is_admin(personnel)
             and not is_senior_admin(personnel)
+            and not can_view_all_tasks(personnel)
+            and not can_create_tasks(personnel)
         ):
             return False
 
         self._personal_tasks_cache = None
-        self.invalidate_sheet_values(self._tasks_ws)
         updated = False
         personal_ws = self._personal_worksheet(task.assignee_name)
         if personal_ws is not None:
-            self.invalidate_sheet_values(personal_ws)
             # Only touch وضعیت — FILTER mirror tabs must not overwrite A:G spill.
             personal_row = self._personal_row_for(personal_ws, task)
             if personal_row is not None:
@@ -2609,11 +2634,17 @@ class SheetsService:
         if tasks_row is not None:
             if self._write_status_cell(self._tasks_ws, tasks_row, status, create_column=True):
                 updated = True
-        elif personal_ws is None:
-            if self._write_status_cell(
-                self._tasks_ws, task.row_index, status, create_column=True
-            ):
-                updated = True
+        elif personal_ws is None or not updated:
+            fallback_row = (
+                task.row_index
+                if (task.sheet_name == "Tasks" or int(task.sheet_gid or 0) == int(self._tasks_ws.id))
+                else None
+            )
+            if fallback_row is not None:
+                if self._write_status_cell(
+                    self._tasks_ws, fallback_row, status, create_column=True
+                ):
+                    updated = True
 
         return updated
 
@@ -2637,7 +2668,7 @@ class SheetsService:
                 worksheet.add_cols(col - worksheet.col_count)
             worksheet.update_cell(1, col, header_name)
         worksheet.update_cell(row_index, col, value)
-        self.invalidate_sheet_values(worksheet)
+        self._update_cached_cell(worksheet, row_index, col, value)
         return True
 
     def update_task_note(self, task_id: str, personnel: Personnel, note: str) -> bool:

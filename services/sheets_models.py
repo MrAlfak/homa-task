@@ -822,6 +822,10 @@ PERSONNEL_NAME_TO_PERSIAN: dict[str, str] = {
     "baneshi": "بانشی",
     "bakhshi": "بخشی",
     "modir": "مدیر",
+    "amiri": "امیری",
+    "dastranj": "دسترنج",
+    "raeisi": "رییسی",
+    "raisi": "رییسی",
 }
 
 PERSONNEL_PERSIAN_TO_ENGLISH: dict[str, str] = {

@@ -11,3 +11,5 @@ credentials/*.json
 !.gitkeep
 _dokploy.env
 _dokploy_manifest.json
+.tgcloud/
+Homatask_bot/node_modules/
