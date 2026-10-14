@@ -832,6 +832,36 @@ PERSONNEL_PERSIAN_TO_ENGLISH: dict[str, str] = {
     normalize_name(v).lower(): k for k, v in PERSONNEL_NAME_TO_PERSIAN.items()
 }
 
+_SHEIKH_BASE_ALIASES: frozenset[str] = frozenset({
+    "mr.sheikh", "sheikh", "mrsheikh", "mrshiekh", "shiekh",
+    "شیخ", "آقای شیخ", "اقای شیخ", "مدیر", "modir",
+})
+
+_SHEIKH_ALIASES: set[str] = set()
+for _a in _SHEIKH_BASE_ALIASES:
+    _s = _a.lower().strip()
+    _SHEIKH_ALIASES.add(_s)
+    _n = normalize_name(_s).strip().lower()
+    _SHEIKH_ALIASES.add(_n)
+    _SHEIKH_ALIASES.add(_n.replace(" ", ""))
+
+PERSONNEL_ALIASES: dict[str, set[str]] = {
+    alias: _SHEIKH_ALIASES for alias in _SHEIKH_ALIASES
+}
+
+_HONORIFICS = (
+    "اقای ", "آقای ", "خانم ", "مهندس ", "دکتر ",
+    "mr. ", "mr ", "ms. ", "ms ", "mrs. ", "mrs ",
+)
+
+
+def _strip_honorific(text: str) -> str:
+    s = text.strip()
+    for prefix in _HONORIFICS:
+        if s.startswith(prefix):
+            return s[len(prefix):].strip()
+    return s
+
 
 def to_persian_display_name(name: str) -> str:
     """Map known English personnel names to Persian display names, or return as-is."""
@@ -849,34 +879,81 @@ def matches_assignee_name(task_assignee: str, target_name: str) -> bool:
         return False
 
     target_no_spaces = norm_target.replace(" ", "")
+    target_stripped = _strip_honorific(norm_target)
     target_tokens = set(norm_target.split())
     target_counterpart = (
         PERSONNEL_NAME_TO_PERSIAN.get(norm_target)
         or PERSONNEL_PERSIAN_TO_ENGLISH.get(norm_target)
+        or PERSONNEL_NAME_TO_PERSIAN.get(target_stripped)
+        or PERSONNEL_PERSIAN_TO_ENGLISH.get(target_stripped)
         or ""
     )
 
     candidates = split_assignee_candidates(task_assignee)
     for cand in candidates:
         norm_cand = cand.lower()
-        if not norm_cand:
+        clean_cand = normalize_name(cand).strip().lower()
+        if not norm_cand and not clean_cand:
             continue
 
-        if norm_cand == norm_target:
+        cand_stripped = _strip_honorific(clean_cand)
+        cand_no_spaces = clean_cand.replace(" ", "")
+
+        if (
+            norm_cand == norm_target
+            or clean_cand == norm_target
+            or cand_stripped == norm_target
+            or cand_stripped == target_stripped
+        ):
             return True
 
-        if target_counterpart and (norm_cand == target_counterpart or target_counterpart in norm_cand):
+        # Check alias groups (e.g. MR.SHEIKH <-> Modir / مدیر)
+        target_aliases = (
+            PERSONNEL_ALIASES.get(norm_target)
+            or PERSONNEL_ALIASES.get(target_no_spaces)
+            or PERSONNEL_ALIASES.get(target_stripped)
+        )
+        if target_aliases and (
+            norm_cand in target_aliases
+            or clean_cand in target_aliases
+            or cand_no_spaces in target_aliases
+            or cand_stripped in target_aliases
+        ):
+            return True
+        cand_aliases = (
+            PERSONNEL_ALIASES.get(norm_cand)
+            or PERSONNEL_ALIASES.get(clean_cand)
+            or PERSONNEL_ALIASES.get(cand_no_spaces)
+            or PERSONNEL_ALIASES.get(cand_stripped)
+        )
+        if cand_aliases and (
+            norm_target in cand_aliases
+            or target_no_spaces in cand_aliases
+            or target_stripped in cand_aliases
+        ):
+            return True
+
+        if target_counterpart and (
+            norm_cand == target_counterpart
+            or target_counterpart in norm_cand
+            or cand_stripped == target_counterpart
+        ):
             return True
 
         cand_counterpart = (
             PERSONNEL_NAME_TO_PERSIAN.get(norm_cand)
             or PERSONNEL_PERSIAN_TO_ENGLISH.get(norm_cand)
+            or PERSONNEL_NAME_TO_PERSIAN.get(cand_stripped)
+            or PERSONNEL_PERSIAN_TO_ENGLISH.get(cand_stripped)
             or ""
         )
-        if cand_counterpart and (cand_counterpart == norm_target or cand_counterpart in norm_target):
+        if cand_counterpart and (
+            cand_counterpart == norm_target
+            or cand_counterpart in norm_target
+            or cand_counterpart == target_stripped
+        ):
             return True
 
-        cand_no_spaces = norm_cand.replace(" ", "")
         if cand_no_spaces == target_no_spaces:
             return True
 
@@ -1394,13 +1471,21 @@ def template_is_due(entry: TemplateEntry, today: jdatetime.date) -> bool:
 def task_match_key(title: str, assignee: str, due_date: str) -> str:
     due = validate_shamsi_date(due_date) or due_date.strip().lstrip("'")
     clean_title = normalize_name(title).lower()
-    clean_assignee = to_persian_display_name(normalize_name(assignee)).lower().replace(" ", "")
+    norm_assignee = normalize_name(assignee).lower().replace(" ", "")
+    if norm_assignee in _SHEIKH_ALIASES:
+        clean_assignee = "مدیر"
+    else:
+        clean_assignee = to_persian_display_name(normalize_name(assignee)).lower().replace(" ", "")
     return f"{clean_assignee}|{clean_title}|{due}"
 
 
 def task_soft_key(title: str, assignee: str) -> str:
     clean_title = normalize_name(title).lower()
-    clean_assignee = to_persian_display_name(normalize_name(assignee)).lower().replace(" ", "")
+    norm_assignee = normalize_name(assignee).lower().replace(" ", "")
+    if norm_assignee in _SHEIKH_ALIASES:
+        clean_assignee = "مدیر"
+    else:
+        clean_assignee = to_persian_display_name(normalize_name(assignee)).lower().replace(" ", "")
     return f"{clean_assignee}|{clean_title}"
 
 

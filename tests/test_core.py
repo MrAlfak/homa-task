@@ -1405,6 +1405,27 @@ class TestSheetRateLimitAndCaching(unittest.TestCase):
         unrelated = _person(name="Other", role="employee")
         self.assertIsNone(svc.get_task_by_id("t:111:10", unrelated))
 
+    def test_mr_sheikh_modir_aliases(self) -> None:
+        self.assertTrue(matches_assignee_name("Modir", "MR.SHEIKH"))
+        self.assertTrue(matches_assignee_name("مدیر", "MR.SHEIKH"))
+        self.assertTrue(matches_assignee_name("MR.SHEIKH", "Modir"))
+        self.assertTrue(matches_assignee_name("mrshiekh", "Modir"))
+        self.assertTrue(matches_assignee_name("sheikh", "مدیر"))
+        self.assertTrue(matches_assignee_name("آقای شیخ", "Modir"))
+
+    def test_task_match_key_sheikh_alias(self) -> None:
+        from services.sheets_models import task_match_key, task_soft_key
+
+        k1 = task_match_key("بررسی پروپوزال", "MR.SHEIKH", "1405/06/16")
+        k2 = task_match_key("بررسی پروپوزال", "Modir", "1405/06/16")
+        k3 = task_match_key("بررسی پروپوزال", "مدیر", "1405/06/16")
+        self.assertEqual(k1, k2)
+        self.assertEqual(k2, k3)
+
+        s1 = task_soft_key("بررسی پروپوزال", "MR.SHEIKH")
+        s2 = task_soft_key("بررسی پروپوزال", "Modir")
+        self.assertEqual(s1, s2)
+
 
 
 if __name__ == "__main__":

@@ -2622,7 +2622,14 @@ class SheetsService:
 
         self._personal_tasks_cache = None
         updated = False
-        personal_ws = self._personal_worksheet(task.assignee_name)
+        personal_ws = None
+        if task.sheet_gid and int(task.sheet_gid) != int(self._tasks_ws.id):
+            personal_ws = self._worksheet_by_gid(task.sheet_gid)
+        elif task.sheet_name and task.sheet_name != "Tasks":
+            personal_ws = self._personal_worksheet(task.sheet_name)
+        if personal_ws is None:
+            personal_ws = self._personal_worksheet(task.assignee_name)
+
         if personal_ws is not None:
             # Only touch وضعیت — FILTER mirror tabs must not overwrite A:G spill.
             personal_row = self._personal_row_for(personal_ws, task)
@@ -2677,7 +2684,14 @@ class SheetsService:
             return False
         self._personal_tasks_cache = None
         updated = False
-        personal_ws = self._personal_worksheet(task.assignee_name)
+        personal_ws = None
+        if task.sheet_gid and int(task.sheet_gid) != int(self._tasks_ws.id):
+            personal_ws = self._worksheet_by_gid(task.sheet_gid)
+        elif task.sheet_name and task.sheet_name != "Tasks":
+            personal_ws = self._personal_worksheet(task.sheet_name)
+        if personal_ws is None:
+            personal_ws = self._personal_worksheet(task.assignee_name)
+
         if personal_ws is not None:
             personal_row = self._personal_row_for(personal_ws, task)
             if personal_row is not None:
