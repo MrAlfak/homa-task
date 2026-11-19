@@ -265,6 +265,13 @@ GENERAL_PROJECT_CATEGORIES: tuple[str, ...] = (
 )
 
 PROJECTS_SHEET_HEADER = "پروژه"
+PROJECTS_ACTIVE_HEADER = "فعال"
+PROJECTS_ACTIVE_HEADER_ALIASES = frozenset({
+    PROJECTS_ACTIVE_HEADER,
+    "active",
+    "Active",
+    "وضعیت",
+})
 PROJECTS_HEADER_ALIASES = frozenset({
     PROJECTS_SHEET_HEADER,
     "project",
@@ -386,9 +393,17 @@ EDITING_SHEET_ALIASES: tuple[str, ...] = (
     "Tadvin",
     "تدوین",
 )
+IN_PROGRESS_SHEET_NAME = "In_Progress"
+IN_PROGRESS_SHEET_ALIASES: tuple[str, ...] = (
+    "In_Progress",
+    "In Progress",
+    "در حال انجام",
+    "درحال انجام",
+)
 SYSTEM_TAB_ORDER: tuple[str, ...] = (
     "Projects",
     "Tasks",
+    "In_Progress",
     "Personnel",
     "Templates",
     "SMS",
@@ -1201,6 +1216,30 @@ def projects_data_start(col_values: list[str]) -> int:
     if col_values[0].strip() in PROJECTS_HEADER_ALIASES:
         return 1
     return 0
+
+
+PROJECTS_INACTIVE_WORDS = frozenset({
+    "false",
+    "0",
+    "no",
+    "n",
+    "off",
+    "غیرفعال",
+    "غیر فعال",
+    "خیر",
+    "نه",
+})
+
+
+def projects_row_is_active(raw: Any) -> bool:
+    """Projects column B («فعال»): blank/unknown → active; explicit false → hidden."""
+    cleaned = str(raw or "").strip()
+    if not cleaned:
+        return True
+    normalized = cleaned.lower().replace("\u200c", " ")
+    while "  " in normalized:
+        normalized = normalized.replace("  ", " ")
+    return normalized not in PROJECTS_INACTIVE_WORDS
 
 
 def sort_projects(projects: list[str]) -> list[str]:

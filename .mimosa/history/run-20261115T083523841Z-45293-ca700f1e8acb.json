@@ -1,0 +1,42 @@
+{
+  "schemaVersion": "mimosa-finding-history/v1",
+  "runId": "20261115T083523841Z-45293-ca700f1e8acb",
+  "runStatus": "inconclusive",
+  "errors": [
+    "scan:services/sheets_models.py: scanner_failed: spawnSync /opt/homebrew/Cellar/node/26.7.0/bin/node ETIMEDOUT",
+    "scan:services/sheets.py: scanner_failed: spawnSync /opt/homebrew/Cellar/node/26.7.0/bin/node ETIMEDOUT",
+    "scan:services/sheets_async.py: scanner_failed: spawnSync /opt/homebrew/Cellar/node/26.7.0/bin/node ETIMEDOUT"
+  ],
+  "target": ".",
+  "revision": "3475b019a12bf8e049640b38f42405e2f763c482",
+  "diffHash": "0982bb3817a4709b45e4f636f3497275efbdd6b4d7a397712f5a6446bbe7d0e1",
+  "rulesVersion": "unavailable",
+  "recordedAt": "2026-11-15T08:35:23.841Z",
+  "timing": {
+    "startedAt": "2026-11-15T08:35:21.635Z",
+    "completedAt": "2026-11-15T08:35:23.841Z",
+    "durationMs": 2206
+  },
+  "tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "modelCalls": 0,
+    "measurement": "known-zero"
+  },
+  "findings": {
+    "total": 0,
+    "bySeverity": {},
+    "byStatus": {}
+  },
+  "coverage": {
+    "status": "partial",
+    "reasonCounts": {
+      "baseline_partial": 1,
+      "scanner_failed": 3,
+      "project_check_failed": 3
+    }
+  },
+  "evidenceBoundary": "static_only",
+  "immutableReport": ".mimosa/reports/task-review-sess_02721764-29aa-4550-b618-63bbaee8b41f-20261115T083523841Z-45293-ca700f1e8acb.json"
+}

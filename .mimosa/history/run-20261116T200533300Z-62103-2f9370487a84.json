@@ -1,0 +1,41 @@
+{
+  "schemaVersion": "mimosa-finding-history/v1",
+  "runId": "20261116T200533300Z-62103-2f9370487a84",
+  "runStatus": "inconclusive",
+  "errors": [
+    "bash-discovery:.tools/go/src/os/user/lookup_windows.go: bash_discovery_incomplete: project enumeration exceeded 5000 reviewable files",
+    "baseline:.tools/go/src/os/user/lookup_windows.go: baseline_partial: baseline exceeded 5000 candidate files"
+  ],
+  "target": ".",
+  "revision": "3475b019a12bf8e049640b38f42405e2f763c482",
+  "diffHash": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "rulesVersion": "unavailable",
+  "recordedAt": "2026-11-16T20:05:33.300Z",
+  "timing": {
+    "startedAt": "2026-11-16T20:05:32.191Z",
+    "completedAt": "2026-11-16T20:05:33.300Z",
+    "durationMs": 1109
+  },
+  "tokens": {
+    "input": 0,
+    "output": 0,
+    "total": 0,
+    "modelCalls": 0,
+    "measurement": "known-zero"
+  },
+  "findings": {
+    "total": 0,
+    "bySeverity": {},
+    "byStatus": {}
+  },
+  "coverage": {
+    "status": "partial",
+    "reasonCounts": {
+      "bash_discovery_incomplete": 1,
+      "baseline_partial": 1,
+      "project_check_failed": 2
+    }
+  },
+  "evidenceBoundary": "static_only",
+  "immutableReport": ".mimosa/reports/task-review-sess_02721764-29aa-4550-b618-63bbaee8b41f-20261116T200533300Z-62103-2f9370487a84.json"
+}

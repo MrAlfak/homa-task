@@ -23,6 +23,8 @@ from services.sheets_models import (
     CONTENT_SHEET_NAME,
     EDITING_SHEET_ALIASES,
     EDITING_SHEET_NAME,
+    IN_PROGRESS_SHEET_ALIASES,
+    IN_PROGRESS_SHEET_NAME,
     FILMING_HEADERS,
     FILMING_PROJECT_HEADER_ALIASES,
     FILMING_SHEET_ALIASES,
@@ -39,6 +41,8 @@ from services.sheets_models import (
     PRIORITIES,
     PRIORITIES_PERSIAN,
     normalize_priority,
+    PROJECTS_ACTIVE_HEADER,
+    PROJECTS_ACTIVE_HEADER_ALIASES,
     PROJECTS_CACHE_TTL_SEC,
     PROJECTS_HEADER_ALIASES,
     PROJECTS_SHEET_HEADER,
@@ -91,6 +95,7 @@ from services.sheets_models import (
     parse_task_id,
     personnel_from_record,
     projects_data_start,
+    projects_row_is_active,
     recent_shamsi_dates,
     record_is_active,
     record_telegram_id,
@@ -188,6 +193,7 @@ class SheetsService:
             self.ensure_content_report_schema()
             self.ensure_sms_schema()
             self.ensure_template_schema()
+            self.ensure_in_progress_sheet()
             if os.getenv("HOMA_RUN_SHEET_MIGRATIONS", "").strip() in ("1", "true", "yes"):
                 self.ensure_all_status_and_priority_dropdowns()
                 self.ensure_sheet_vazirmatn_font()
@@ -788,10 +794,21 @@ class SheetsService:
     _projects_data_start = staticmethod(projects_data_start)
 
     def ensure_projects_schema(self) -> list[str]:
-        """Ensure Projects tab has a header and default cross-project categories."""
+        """Ensure Projects tab has a header and default cross-project categories.
+
+        Column B holds the «فعال» toggle: blank/TRUE = shown in the bot,
+        FALSE/غیرفعال = hidden from every project picker.
+        """
         ws = self._projects_ws
         col_values = ws.col_values(1)
         added: list[str] = []
+
+        # Column B header for the active toggle.
+        try:
+            if str(ws.acell("B1").value or "").strip() not in PROJECTS_ACTIVE_HEADER_ALIASES:
+                ws.update_cell(1, 2, PROJECTS_ACTIVE_HEADER)
+        except Exception:
+            logger.exception("Projects sheet: failed adding %s header", PROJECTS_ACTIVE_HEADER)
 
         if not col_values:
             rows = [[PROJECTS_SHEET_HEADER], *[[name] for name in GENERAL_PROJECT_CATEGORIES]]
@@ -823,6 +840,56 @@ class SheetsService:
             logger.info("Projects sheet: added categories %s", added)
             self.invalidate_projects_cache()
         return added
+
+    def ensure_in_progress_sheet(self) -> None:
+        """Mirror tab listing only Tasks whose status is «در حال انجام».
+
+        Formula-driven (FILTER over Tasks!A2:I2000): a row shows up while the
+        task is running and vanishes the moment its status changes to
+        «انجام شده» / «لغو شده», so the bot never writes rows here.
+        """
+        ws = self._all_worksheets().get(IN_PROGRESS_SHEET_NAME)
+        if ws is None:
+            by_alias = {
+                normalize_sheet_title(title).lower(): candidate
+                for title, candidate in self._all_worksheets().items()
+            }
+            for alias in IN_PROGRESS_SHEET_ALIASES:
+                ws = by_alias.get(normalize_sheet_title(alias).lower())
+                if ws is not None:
+                    break
+        if ws is None:
+            try:
+                ws = self._spreadsheet.add_worksheet(
+                    title=IN_PROGRESS_SHEET_NAME, rows=500, cols=10
+                )
+                self.invalidate_worksheet_cache()
+                logger.info("In-progress sheet: created tab %r", IN_PROGRESS_SHEET_NAME)
+            except Exception:
+                logger.exception("In-progress sheet: could not create tab")
+                return
+        try:
+            headers = self._get_sheet_headers(ws)
+            if not headers or not str(headers[0]).strip():
+                ws.update("A1:I1", [TASKS_HEADERS], value_input_option="USER_ENTERED")
+            tasks_title = self._tasks_ws.title.replace("'", "''")
+            formula = (
+                f'=IFERROR(FILTER(\'{tasks_title}\'!A2:I2000,'
+                f'\'{tasks_title}\'!I2:I2000="در حال انجام"),"")'
+            )
+            current = str(ws.acell("A2", value_render_option="FORMULA").value or "")
+            probe = current.upper().replace(" ", "").replace("'", "")
+            already_ok = (
+                "FILTER(" in probe
+                and f"{tasks_title.upper()}!" in probe
+                and "I2:I2000" in probe
+                and "درحالانجام" in probe
+            )
+            if not already_ok:
+                ws.update("A2", formula, value_input_option="USER_ENTERED")
+                logger.info("In-progress sheet: FILTER formula set on A2")
+        except Exception:
+            logger.exception("In-progress sheet: setup failed")
 
     sort_projects = staticmethod(sort_projects)
     is_general_project = staticmethod(is_general_project)
@@ -2079,25 +2146,62 @@ class SheetsService:
         return sorted(seen.values(), key=lambda p: p.name)
 
     def get_projects(self) -> list[str]:
-        """Cached Projects list (Sheets API calls are rate-limited per minute)."""
+        """Cached Projects list (Sheets API calls are rate-limited per minute).
+
+        Rows whose «فعال» column (B) is explicitly false/غیرفعال are hidden
+        from the bot; blank or unknown values stay visible.
+        """
         now = time.monotonic()
         if self._projects_cache is not None:
             cached_at, projects = self._projects_cache
             if now - cached_at < PROJECTS_CACHE_TTL_SEC:
                 return projects
 
-        values = self._projects_ws.col_values(1)
-        data_start = self._projects_data_start(values)
+        values = self._projects_ws.get_all_values()
+        col_a = [row[0] if row else "" for row in values]
+        data_start = self._projects_data_start(col_a)
         projects: list[str] = []
         seen: set[str] = set()
-        for value in values[data_start:]:
-            name = value.strip()
-            if name and name not in seen:
-                seen.add(name)
-                projects.append(name)
+        for row in values[data_start:]:
+            padded = row + [""] * max(0, 2 - len(row))
+            name = padded[0].strip()
+            if not name or name in seen:
+                continue
+            if not projects_row_is_active(padded[1]):
+                continue
+            seen.add(name)
+            projects.append(name)
         projects = self.sort_projects(projects)
         self._projects_cache = (now, projects)
         return projects
+
+    def set_project_active(self, name: str, active: bool) -> bool:
+        """Toggle the «فعال» flag (column B) for a project row.
+
+        Returns ``True`` when the flag was written, ``False`` when the
+        project row could not be found.
+        """
+        values = self._projects_ws.get_all_values()
+        col_a = [row[0] if row else "" for row in values]
+        data_start = self._projects_data_start(col_a)
+        target = name.strip()
+        for index, row in enumerate(values):
+            if index < data_start:
+                continue
+            padded = row + [""] * max(0, 2 - len(row))
+            if padded[0].strip() != target:
+                continue
+            row_number = index + 1
+            self._projects_ws.update_cell(row_number, 2, "TRUE" if active else "FALSE")
+            self.invalidate_projects_cache()
+            logger.info(
+                "Projects sheet: %s marked %s (row %d)",
+                target,
+                "active" if active else "inactive",
+                row_number,
+            )
+            return True
+        return False
 
     def _personal_worksheet(self, employee_name: str) -> gspread.Worksheet | None:
         if not employee_name:

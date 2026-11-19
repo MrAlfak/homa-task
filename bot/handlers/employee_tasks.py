@@ -696,7 +696,7 @@ async def set_task_due_date(callback: CallbackQuery, state: FSMContext) -> None:
         return
 
     payload = callback.data.removeprefix("task:setdue:")
-    task_id, val = payload.split(":", 1)
+    task_id, val = payload.rsplit(":", 1)
 
     if val == "manual":
         await callback.answer()
@@ -846,7 +846,7 @@ async def set_task_priority(callback: CallbackQuery) -> None:
         return
 
     payload = callback.data.removeprefix("task:setpri:")
-    task_id, priority = payload.split(":", 1)
+    task_id, priority = payload.rsplit(":", 1)
 
     await callback.answer("در حال تغییر اولویت…")
     success = await SheetsAsync.update_task_priority(task_id, auth.personnel, priority)

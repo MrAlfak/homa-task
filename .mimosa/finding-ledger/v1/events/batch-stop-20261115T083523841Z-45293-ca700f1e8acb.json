@@ -1,0 +1,73 @@
+{
+  "schemaVersion": "mimosa-finding-ledger-batch/v1",
+  "batchId": "stop-20261115T083523841Z-45293-ca700f1e8acb",
+  "runId": "20261115T083523841Z-45293-ca700f1e8acb",
+  "runStatus": "inconclusive",
+  "coverage": {
+    "status": "partial",
+    "reasons": [
+      {
+        "code": "baseline_partial",
+        "stage": "baseline",
+        "target": ".tools/go/src/os/user/lookup_windows.go",
+        "detail": "baseline exceeded 5000 candidate files",
+        "affectsCompletion": false
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "services/sheets_models.py",
+        "detail": "spawnSync /opt/homebrew/Cellar/node/26.7.0/bin/node ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "services/sheets.py",
+        "detail": "spawnSync /opt/homebrew/Cellar/node/26.7.0/bin/node ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "scanner_failed",
+        "stage": "scan",
+        "target": "services/sheets_async.py",
+        "detail": "spawnSync /opt/homebrew/Cellar/node/26.7.0/bin/node ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "services/sheets_models.py",
+        "detail": "scanner_failed: spawnSync /opt/homebrew/Cellar/node/26.7.0/bin/node ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "services/sheets.py",
+        "detail": "scanner_failed: spawnSync /opt/homebrew/Cellar/node/26.7.0/bin/node ETIMEDOUT",
+        "affectsCompletion": true
+      },
+      {
+        "code": "project_check_failed",
+        "stage": "scan",
+        "target": "services/sheets_async.py",
+        "detail": "scanner_failed: spawnSync /opt/homebrew/Cellar/node/26.7.0/bin/node ETIMEDOUT",
+        "affectsCompletion": true
+      }
+    ]
+  },
+  "source": {
+    "component": "zcode-hook",
+    "operationId": "Stop"
+  },
+  "revision": "3475b019a12bf8e049640b38f42405e2f763c482",
+  "diffHash": "0982bb3817a4709b45e4f636f3497275efbdd6b4d7a397712f5a6446bbe7d0e1",
+  "rulesVersion": "unavailable",
+  "sessionHash": "f9bc40f4aa4324cdf2cb897294cdfb4e4c606ba887d7113ac3d72ef171298895",
+  "reportRef": ".mimosa/reports/task-review-sess_02721764-29aa-4550-b618-63bbaee8b41f-20261115T083523841Z-45293-ca700f1e8acb.json",
+  "events": [],
+  "observedFindingIds": [],
+  "verifiedFiles": [],
+  "recordedAt": "2026-11-15T08:35:24.032Z"
+}

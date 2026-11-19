@@ -137,6 +137,10 @@ class SheetsAsync:
         return await run_blocking(cls._svc().get_projects)
 
     @classmethod
+    async def set_project_active(cls, name: str, active: bool) -> bool:
+        return await run_blocking(cls._svc().set_project_active, name, active)
+
+    @classmethod
     async def get_broadcast_recipients(cls) -> list[Personnel]:
         return await run_blocking(cls._svc().get_broadcast_recipients)
 
